@@ -68,7 +68,7 @@ def load_data():
 def save_data():
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump({"papers": st.session_state.papers, "notes": st.session_state.notes}, f, ensure_ascii=False, indent=2)
+            json.dump({"papers": st.session_state.papers, "notes": st.session_state.notes, "selected_id": st.session_state.selected_id}, f, ensure_ascii=False, indent=2)
     except Exception as e:
         st.warning(f"Could not save data: {e}")
 
@@ -77,6 +77,7 @@ if "loaded" not in st.session_state:
     data = load_data()
     st.session_state.papers = data.get("papers", [])
     st.session_state.notes = data.get("notes", {})
+    st.session_state.selected_id = data.get("selected_id", None)
     st.session_state.loaded = True
 if "selected_id" not in st.session_state:
     st.session_state.selected_id = None
@@ -227,6 +228,7 @@ with st.sidebar:
             label = f"{'📄 ' if p.get('source')=='pdf' else ''}{p['title'][:42]}{'...' if len(p['title'])>42 else ''}"
             if st.button(label, key=f"sel_{p['id']}", use_container_width=True):
                 st.session_state.selected_id = p["id"]
+                save_data()
                 st.rerun()
     else:
         st.markdown('<div style="font-size:12px; color:#888885; line-height:1.7;">No papers yet.<br>Add one to get started.</div>', unsafe_allow_html=True)
@@ -434,7 +436,13 @@ elif page == "📝 Notes":
         st.info("Add papers first to attach notes to them.")
     else:
         paper_titles = {p["id"]: p["title"] for p in st.session_state.papers}
-        selected_for_note = st.selectbox("Select paper", options=list(paper_titles.keys()), format_func=lambda x: paper_titles[x])
+        paper_ids = list(paper_titles.keys())
+        # default to currently selected paper if available
+        default_idx = 0
+        if st.session_state.selected_id in paper_ids:
+            default_idx = paper_ids.index(st.session_state.selected_id)
+        selected_for_note = st.selectbox("Select paper", options=paper_ids, index=default_idx, format_func=lambda x: paper_titles[x])
+        st.session_state.selected_id = selected_for_note
 
         existing = st.session_state.notes.get(selected_for_note, "")
         new_note = st.text_area("Your notes", value=existing, height=200, placeholder="Write your thoughts, critiques, connections to other work...")
