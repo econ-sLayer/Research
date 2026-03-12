@@ -52,10 +52,34 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 </style>
 """, unsafe_allow_html=True)
 
+# ── Persistent storage (local JSON file) ─────────────────────
+import os
+DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "litlens_data.json")
+
+def load_data():
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"papers": [], "notes": {}}
+
+def save_data():
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump({"papers": st.session_state.papers, "notes": st.session_state.notes}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.warning(f"Could not save data: {e}")
+
 # ── Session state ─────────────────────────────────────────────
-for key, val in [("papers", []), ("selected_id", None), ("notes", {})]:
-    if key not in st.session_state:
-        st.session_state[key] = val
+if "loaded" not in st.session_state:
+    data = load_data()
+    st.session_state.papers = data.get("papers", [])
+    st.session_state.notes = data.get("notes", {})
+    st.session_state.loaded = True
+if "selected_id" not in st.session_state:
+    st.session_state.selected_id = None
 
 # ── Helpers ───────────────────────────────────────────────────
 def extract_pdf_text(file_bytes):
@@ -186,7 +210,10 @@ def get_all_gaps():
 # ── SIDEBAR ───────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ◎ LitLens")
-    st.markdown('<div style="font-size:11px; color:#c8f07a; font-family:DM Mono,monospace; margin-bottom:8px;">no API key needed</div>', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:11px; color:#c8f07a; font-family:DM Mono,monospace; margin-bottom:2px;">no API key needed</div>', unsafe_allow_html=True)
+    import os
+    data_exists = os.path.exists(DATA_FILE)
+    st.markdown(f'<div style="font-size:10px; color:#888885; font-family:DM Mono,monospace; margin-bottom:8px;">💾 {"data saved" if data_exists else "no saved data yet"}</div>', unsafe_allow_html=True)
     st.markdown("---")
     st.markdown("**Navigation**")
     page = st.radio("page", ["📚 Library", "📄 Add Paper", "📎 Upload PDF", "🔗 Synthesis", "📝 Notes"], label_visibility="collapsed")
@@ -227,6 +254,7 @@ if page == "📚 Library":
             if st.button("🗑 Remove", type="secondary"):
                 st.session_state.papers = [x for x in st.session_state.papers if x["id"] != p["id"]]
                 st.session_state.selected_id = None
+                save_data()
                 st.rerun()
 
         meta_parts = [x for x in [p.get("authors"), p.get("year"), p.get("journal")] if x]
@@ -261,6 +289,7 @@ if page == "📚 Library":
                     text = p.get("abstract","") + " " + p.get("full_text","")
                     result = analyze_locally(p["title"], text)
                     p.update(result)
+                    save_data()
                 st.rerun()
         with col2:
             # Edit metadata
@@ -276,6 +305,7 @@ if page == "📚 Library":
                 new_type = st.selectbox("Type", ["empirical","methods","review","theory"], index=["empirical","methods","review","theory"].index(p.get("type","empirical")))
                 if st.form_submit_button("Save"):
                     p.update({"title": new_title, "authors": new_authors, "year": new_year, "journal": new_journal, "type": new_type})
+                    save_data()
                     del st.session_state[f"editing_{p['id']}"]
                     st.rerun()
 
@@ -316,6 +346,7 @@ elif page == "📄 Add Paper":
                 }
                 st.session_state.papers.append(paper)
                 st.session_state.selected_id = paper["id"]
+                save_data()
             st.success(f"✓ '{title}' added!")
             st.rerun()
 
@@ -352,6 +383,7 @@ elif page == "📎 Upload PDF":
                             }
                             st.session_state.papers.append(paper)
                             st.session_state.selected_id = paper["id"]
+                            save_data()
                             st.success(f"✓ '{title[:60]}' added! Check Library to edit the title/authors.")
                         except Exception as e:
                             st.error(f"Error processing '{f.name}': {str(e)}")
@@ -411,6 +443,7 @@ elif page == "📝 Notes":
         with col1:
             if st.button("💾 Save Note", type="primary", use_container_width=True):
                 st.session_state.notes[selected_for_note] = new_note
+                save_data()
                 st.success("Saved!")
         with col2:
             if st.button("🗑 Clear Note", use_container_width=True):
