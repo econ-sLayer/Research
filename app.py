@@ -109,27 +109,132 @@ def extract_title_from_text(text, filename):
         return lines[0][:120]
     return filename.replace(".pdf", "")
 
+def extract_structured_themes(text):
+    """Extract structured research themes across 5 categories"""
+    tl = text.lower()
+
+    # 1. GEOPOLITICAL FACTORS — countries, regions, blocs
+    geo_keywords = {
+        "united states": "USA", "u.s.": "USA", "american": "USA",
+        "china": "China", "chinese": "China",
+        "european union": "EU", "europe": "Europe", "european": "Europe",
+        "united kingdom": "UK", "britain": "UK", "british": "UK",
+        "germany": "Germany", "france": "France", "italy": "Italy",
+        "japan": "Japan", "japanese": "Japan",
+        "india": "India", "indian": "India",
+        "russia": "Russia", "russian": "Russia",
+        "brazil": "Brazil", "latin america": "Latin America",
+        "africa": "Africa", "african": "Africa",
+        "middle east": "Middle East", "asia": "Asia", "asian": "Asia",
+        "developing countries": "Developing Countries",
+        "emerging markets": "Emerging Markets",
+        "oecd": "OECD countries", "brics": "BRICS",
+        "global": "Global", "cross-country": "Cross-country",
+        "multinational": "Multinational", "international": "International",
+    }
+    geo_found = list(dict.fromkeys([v for k, v in geo_keywords.items() if k in tl]))[:4]
+
+    # 2. PERIOD OF DATA — years, decades, time ranges
+    import re as _re
+    period_found = []
+    # explicit year ranges like 2000-2020, 1990–2015
+    ranges = _re.findall(r'((?:19|20)\d{2})\s*[-–]\s*((?:19|20)\d{2})', text)
+    for start, end in ranges[:3]:
+        period_found.append(f"{start}–{end}")
+    # single years mentioned as study period
+    if not period_found:
+        decades = _re.findall(r'((?:19|20)\d{2}s)', tl)
+        period_found = list(dict.fromkeys(decades))[:3]
+    # keywords
+    period_kw = {
+        "longitudinal": "Longitudinal", "panel data": "Panel data",
+        "time series": "Time series", "cross-sectional": "Cross-sectional",
+        "annual": "Annual data", "monthly": "Monthly data",
+        "quarterly": "Quarterly data", "daily": "Daily data",
+        "pre-pandemic": "Pre-pandemic", "post-pandemic": "Post-pandemic",
+        "covid": "COVID-19 period", "financial crisis": "Financial crisis period",
+    }
+    for k, v in period_kw.items():
+        if k in tl and v not in period_found:
+            period_found.append(v)
+    period_found = period_found[:4]
+
+    # 3. TECHNIQUES OF ANALYSIS
+    technique_keywords = {
+        "regression": "Regression", "ols": "OLS", "fixed effects": "Fixed effects",
+        "random effects": "Random effects", "instrumental variable": "IV / 2SLS",
+        "difference-in-difference": "Diff-in-diff", "difference in difference": "Diff-in-diff",
+        "did ": "Diff-in-diff", "propensity score": "Propensity score matching",
+        "regression discontinuity": "Regression discontinuity",
+        "synthetic control": "Synthetic control",
+        "var model": "VAR model", "vector autoregression": "VAR model",
+        "granger": "Granger causality", "cointegration": "Cointegration",
+        "meta-analysis": "Meta-analysis", "systematic review": "Systematic review",
+        "machine learning": "Machine learning", "deep learning": "Deep learning",
+        "neural network": "Neural network", "random forest": "Random forest",
+        "support vector": "SVM", "logistic regression": "Logistic regression",
+        "probit": "Probit model", "tobit": "Tobit model",
+        "event study": "Event study", "structural equation": "SEM",
+        "bayesian": "Bayesian analysis", "gmm": "GMM",
+        "survey": "Survey analysis", "interview": "Qualitative interviews",
+        "case study": "Case study", "content analysis": "Content analysis",
+        "natural experiment": "Natural experiment",
+    }
+    tech_found = list(dict.fromkeys([v for k, v in technique_keywords.items() if k in tl]))[:5]
+
+    # 4. DATASETS
+    dataset_keywords = {
+        "world bank": "World Bank data", "imf": "IMF data",
+        "worldscope": "Worldscope", "compustat": "Compustat",
+        "crsp": "CRSP", "bloomberg": "Bloomberg",
+        "eurostat": "Eurostat", "oecd data": "OECD data",
+        "census": "Census data", "survey data": "Survey data",
+        "panel data": "Panel dataset", "administrative data": "Administrative data",
+        "firm-level": "Firm-level data", "country-level": "Country-level data",
+        "micro-level": "Micro-level data", "macro-level": "Macro-level data",
+        "twitter": "Twitter/X data", "social media": "Social media data",
+        "patent": "Patent data", "annual report": "Annual reports",
+        "financial statement": "Financial statements",
+        "proprietary": "Proprietary dataset", "hand-collected": "Hand-collected data",
+    }
+    data_found = list(dict.fromkeys([v for k, v in dataset_keywords.items() if k in tl]))[:4]
+
+    # 5. VARIABLES
+    variable_keywords = {
+        "gdp": "GDP", "economic growth": "Economic growth",
+        "inflation": "Inflation", "unemployment": "Unemployment",
+        "interest rate": "Interest rate", "exchange rate": "Exchange rate",
+        "stock return": "Stock returns", "firm performance": "Firm performance",
+        "profitability": "Profitability", "leverage": "Leverage",
+        "investment": "Investment", "innovation": "Innovation",
+        "productivity": "Productivity", "trade": "Trade",
+        "foreign direct investment": "FDI", "fdi": "FDI",
+        "esg": "ESG scores", "sustainability": "Sustainability",
+        "corporate governance": "Corporate governance",
+        "board": "Board characteristics", "ceo": "CEO characteristics",
+        "ownership": "Ownership structure", "dividend": "Dividends",
+        "liquidity": "Liquidity", "volatility": "Volatility",
+        "credit": "Credit", "debt": "Debt",
+        "income inequality": "Income inequality", "poverty": "Poverty",
+        "education": "Education", "health": "Health outcomes",
+        "co2": "CO2 emissions", "carbon": "Carbon emissions",
+        "temperature": "Temperature", "price": "Prices",
+    }
+    var_found = list(dict.fromkeys([v for k, v in variable_keywords.items() if k in tl]))[:5]
+
+    return {
+        "geopolitical": geo_found,
+        "period": period_found,
+        "techniques": tech_found,
+        "datasets": data_found,
+        "variables": var_found,
+    }
+
 def auto_extract_keywords(text):
-    """Extract simple keyword themes from text without AI"""
-    common_themes = [
-        "machine learning", "deep learning", "neural network", "transformer",
-        "attention mechanism", "natural language processing", "nlp", "computer vision",
-        "reinforcement learning", "transfer learning", "fine-tuning", "pre-training",
-        "clinical", "medical", "healthcare", "diagnosis", "treatment",
-        "survey", "systematic review", "meta-analysis", "randomized",
-        "classification", "regression", "clustering", "optimization",
-        "dataset", "benchmark", "evaluation", "performance",
-        "robustness", "interpretability", "explainability", "fairness",
-        "graph neural", "convolutional", "recurrent", "lstm", "bert", "gpt",
-        "zero-shot", "few-shot", "prompt", "generative", "diffusion",
-        "social", "education", "environment", "climate", "energy",
-        "protein", "genomics", "biology", "chemistry", "drug",
-        "robot", "autonomous", "sensor", "iot", "edge computing",
-        "privacy", "security", "federated", "differential privacy",
-    ]
-    text_lower = text.lower()
-    found = [t for t in common_themes if t in text_lower]
-    return found[:6] if found else ["research", "analysis"]
+    """Legacy: flat list of themes for per-paper display"""
+    themes_struct = extract_structured_themes(text)
+    flat = (themes_struct["techniques"] + themes_struct["variables"] + themes_struct["geopolitical"])
+    return flat[:6] if flat else ["research", "analysis"]
 
 def simple_summarize(text, title):
     """Create a basic extractive summary without AI"""
@@ -401,16 +506,40 @@ elif page == "🔗 Synthesis":
     else:
         st.markdown(f'<div style="color:#888885;font-size:14px;margin-bottom:1rem;">{len(papers)} papers in your library</div>', unsafe_allow_html=True)
 
-        # Themes
+        # Structured cross-cutting themes
         st.markdown('<div class="section-title">Cross-cutting Themes</div>', unsafe_allow_html=True)
-        themes = get_all_themes()
-        colors = ["#c8f07a","#7eb8f7","#b49ffa","#f5c97a","#ff6b6b","#5dc4a5"]
-        if themes:
-            tcols = st.columns(min(len(themes), 3))
-            for i, (theme, count) in enumerate(themes[:9]):
-                with tcols[i % 3]:
-                    c = colors[i % len(colors)]
-                    st.markdown(f'<div style="background:#18181c;border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:10px 14px;margin-bottom:8px;"><span style="color:{c};font-weight:600;font-size:14px;">{theme}</span><br><span style="color:#888885;font-size:11px;font-family:DM Mono,monospace;">{count} paper{"s" if count!=1 else ""}</span></div>', unsafe_allow_html=True)
+
+        # Aggregate structured themes across all papers
+        from collections import defaultdict
+        agg = {"geopolitical": defaultdict(list), "period": defaultdict(list),
+               "techniques": defaultdict(list), "datasets": defaultdict(list), "variables": defaultdict(list)}
+
+        for p in papers:
+            text = (p.get("abstract","") + " " + p.get("full_text","") + " " + p.get("summary","")).lower()
+            structured = extract_structured_themes(text)
+            for cat, items in structured.items():
+                for item in items:
+                    agg[cat][item].append(p["title"])
+
+        cat_config = [
+            ("geopolitical", "🌍 Geopolitical Focus", "#7eb8f7"),
+            ("period",       "📅 Period of Data",     "#f5c97a"),
+            ("techniques",   "🔬 Analysis Techniques","#c8f07a"),
+            ("datasets",     "🗄 Datasets Used",      "#b49ffa"),
+            ("variables",    "📊 Key Variables",      "#ff9f7a"),
+        ]
+
+        for cat_key, cat_label, color in cat_config:
+            items = agg[cat_key]
+            if not items:
+                continue
+            st.markdown(f'<div style="font-size:12px;font-weight:500;color:{color};font-family:DM Mono,monospace;text-transform:uppercase;letter-spacing:0.07em;margin:1rem 0 0.4rem;">{cat_label}</div>', unsafe_allow_html=True)
+            chips = ""
+            for item, paper_list in sorted(items.items(), key=lambda x: -len(x[1])):
+                count = len(paper_list)
+                tip = ", ".join(p[:40] for p in paper_list[:3])
+                chips += f'<span title="{tip}" style="display:inline-block;background:#18181c;border:1px solid rgba(255,255,255,0.1);border-radius:100px;padding:4px 12px;font-size:12px;color:{color};margin:3px;cursor:default;">{item} <span style="opacity:0.5;font-size:10px;">×{count}</span></span>'
+            st.markdown(f'<div style="margin-bottom:4px;">{chips}</div>', unsafe_allow_html=True)
 
         # Gaps
         st.markdown('<div class="section-title">Research Gaps Identified</div>', unsafe_allow_html=True)
