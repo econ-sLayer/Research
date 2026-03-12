@@ -2,6 +2,7 @@ import streamlit as st
 import json
 import re
 import io
+import hashlib
 from datetime import datetime
 
 try:
@@ -11,13 +12,13 @@ except ImportError:
     PDF_SUPPORT = False
 
 try:
-    import google.generativeai as genai
-    GENAI_AVAILABLE = True
+    import requests
+    REQUESTS_AVAILABLE = True
 except ImportError:
-    GENAI_AVAILABLE = False
+    REQUESTS_AVAILABLE = False
 
 st.set_page_config(
-    page_title="LitLens — AI Research Assistant",
+    page_title="LitLens — Research Assistant",
     page_icon="◎",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -44,85 +45,131 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .tag-theory { background: rgba(180,159,250,0.1); color: #b49ffa; }
 .tag-pdf { background: rgba(126,184,247,0.1); color: #7eb8f7; }
 .gap-item { background: rgba(255,107,107,0.07); border: 1px solid rgba(255,107,107,0.15); border-radius: 8px; padding: 10px 14px; margin-bottom: 6px; font-size: 13px; color: #e8c5c5; line-height: 1.6; }
-.gap-label { font-family: 'DM Mono', monospace; font-size: 10px; color: #ff6b6b; opacity: 0.7; margin-bottom: 4px; }
 .section-title { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #888885; font-family: 'DM Mono', monospace; margin: 1.25rem 0 0.6rem; }
 .page-title { font-family: 'Instrument Serif', serif; font-size: 2rem; letter-spacing: -0.01em; color: #f0ede8; margin-bottom: 0.25rem; }
 .summary-block { background: #18181c; border: 1px solid rgba(255,255,255,0.07); border-radius: 12px; padding: 1rem 1.25rem; font-size: 14px; line-height: 1.8; color: #ccc8c0; }
+.theme-chip { display:inline-block; background:#18181c; border:1px solid rgba(255,255,255,0.1); border-radius:100px; padding:4px 12px; font-size:12px; color:#c8f07a; margin:3px; }
 </style>
 """, unsafe_allow_html=True)
 
-if "papers" not in st.session_state:
-    st.session_state.papers = []
-if "selected_id" not in st.session_state:
-    st.session_state.selected_id = None
-if "api_key" not in st.session_state:
-    st.session_state.api_key = ""
+# ── Session state ─────────────────────────────────────────────
+for key, val in [("papers", []), ("selected_id", None), ("notes", {})]:
+    if key not in st.session_state:
+        st.session_state[key] = val
 
-def get_model():
-    key = st.session_state.api_key.strip()
-    if not key or not GENAI_AVAILABLE:
-        return None
-    try:
-        genai.configure(api_key=key)
-        return genai.GenerativeModel("gemini-1.5-flash")
-    except Exception:
-        return None
-
-def call_gemini(prompt: str) -> str:
-    model = get_model()
-    if not model:
-        return ""
-    try:
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-def parse_json_response(text: str) -> dict:
-    clean = re.sub(r"```json|```", "", text).strip()
-    try:
-        return json.loads(clean)
-    except Exception:
-        match = re.search(r'\{.*\}', clean, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except Exception:
-                pass
-        return {}
-
-def extract_pdf_text(file_bytes: bytes) -> str:
+# ── Helpers ───────────────────────────────────────────────────
+def extract_pdf_text(file_bytes):
     if not PDF_SUPPORT:
         return ""
     reader = pypdf.PdfReader(io.BytesIO(file_bytes))
     text = ""
-    for page in reader.pages[:20]:
+    for page in reader.pages[:25]:
         text += page.extract_text() or ""
     return text.strip()
 
-def analyze_text(title: str, text: str) -> dict:
-    prompt = f"""Analyze this research paper. Return ONLY a JSON object:
-{{"summary": "2-3 sentence summary", "findings": ["finding 1", "finding 2", "finding 3"], "themes": ["theme1", "theme2", "theme3"], "gaps": ["gap 1", "gap 2"]}}
-Title: {title}
-Text: {text[:4000]}
-Return ONLY valid JSON, no markdown, no explanation."""
-    return parse_json_response(call_gemini(prompt))
+def extract_abstract(text):
+    """Try to find abstract in text"""
+    text_lower = text.lower()
+    for marker in ["abstract", "summary", "introduction"]:
+        idx = text_lower.find(marker)
+        if idx != -1:
+            chunk = text[idx:idx+1500].strip()
+            return chunk
+    return text[:1000]
 
-def analyze_pdf_content(file_bytes: bytes, filename: str) -> dict:
-    text = extract_pdf_text(file_bytes)
-    if not text or len(text) < 100:
-        return {"error": "No readable text found — this may be a scanned PDF."}
-    prompt = f"""Analyze this research paper. Return ONLY a JSON object:
-{{"title": "full title", "authors": "authors string", "year": "year", "journal": "venue", "type": "empirical", "abstract": "abstract text", "summary": "2-3 sentence summary", "findings": ["f1","f2","f3"], "themes": ["t1","t2","t3"], "gaps": ["g1","g2"]}}
-Type must be one of: empirical, methods, review, theory.
-Paper text: {text[:4500]}
-Return ONLY valid JSON, no markdown, no explanation."""
-    result = parse_json_response(call_gemini(prompt))
-    if not result.get("title"):
-        result["title"] = filename.replace(".pdf", "")
-    return result
+def extract_title_from_text(text, filename):
+    """Guess title from first lines of PDF text"""
+    lines = [l.strip() for l in text.split('\n') if len(l.strip()) > 20]
+    if lines:
+        return lines[0][:120]
+    return filename.replace(".pdf", "")
 
-def tag_html(paper_type: str) -> str:
+def auto_extract_keywords(text):
+    """Extract simple keyword themes from text without AI"""
+    common_themes = [
+        "machine learning", "deep learning", "neural network", "transformer",
+        "attention mechanism", "natural language processing", "nlp", "computer vision",
+        "reinforcement learning", "transfer learning", "fine-tuning", "pre-training",
+        "clinical", "medical", "healthcare", "diagnosis", "treatment",
+        "survey", "systematic review", "meta-analysis", "randomized",
+        "classification", "regression", "clustering", "optimization",
+        "dataset", "benchmark", "evaluation", "performance",
+        "robustness", "interpretability", "explainability", "fairness",
+        "graph neural", "convolutional", "recurrent", "lstm", "bert", "gpt",
+        "zero-shot", "few-shot", "prompt", "generative", "diffusion",
+        "social", "education", "environment", "climate", "energy",
+        "protein", "genomics", "biology", "chemistry", "drug",
+        "robot", "autonomous", "sensor", "iot", "edge computing",
+        "privacy", "security", "federated", "differential privacy",
+    ]
+    text_lower = text.lower()
+    found = [t for t in common_themes if t in text_lower]
+    return found[:6] if found else ["research", "analysis"]
+
+def simple_summarize(text, title):
+    """Create a basic extractive summary without AI"""
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 40 and len(s.strip()) < 300]
+    
+    keywords = ["propose", "present", "show", "demonstrate", "find", "result", 
+                "achieve", "improve", "outperform", "introduce", "novel", "new method",
+                "contribute", "first", "state-of-the-art", "significant"]
+    
+    scored = []
+    for s in sentences[:50]:
+        score = sum(1 for k in keywords if k in s.lower())
+        scored.append((score, s))
+    
+    scored.sort(reverse=True)
+    top = [s for _, s in scored[:3]]
+    
+    if top:
+        return " ".join(top)
+    return sentences[0] if sentences else f"Paper: {title}"
+
+def simple_findings(text):
+    """Extract likely findings sentences"""
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    markers = ["we show", "we find", "we demonstrate", "we propose", "we present",
+               "results show", "results indicate", "our method", "our approach",
+               "achieves", "outperforms", "improves", "significantly", "accuracy of",
+               "we conclude", "this paper", "this work"]
+    findings = []
+    for s in sentences:
+        s = s.strip()
+        if 40 < len(s) < 250:
+            if any(m in s.lower() for m in markers):
+                findings.append(s)
+        if len(findings) >= 4:
+            break
+    return findings if findings else ["See abstract for key contributions."]
+
+def simple_gaps(text):
+    """Extract likely limitation/gap sentences"""
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    markers = ["limitation", "future work", "future research", "however", 
+               "drawback", "challenge", "remain", "not address", "beyond the scope",
+               "left for future", "one limitation", "further research"]
+    gaps = []
+    for s in sentences:
+        s = s.strip()
+        if 30 < len(s) < 250:
+            if any(m in s.lower() for m in markers):
+                gaps.append(s)
+        if len(gaps) >= 2:
+            break
+    return gaps if gaps else ["Limitations not explicitly stated in available text."]
+
+def analyze_locally(title, text):
+    """Full local analysis - no API needed"""
+    return {
+        "summary": simple_summarize(text, title),
+        "findings": simple_findings(text),
+        "themes": auto_extract_keywords(text),
+        "gaps": simple_gaps(text),
+    }
+
+def tag_html(paper_type):
     return f'<span class="tag tag-{paper_type}">{paper_type}</span>'
 
 def get_all_themes():
@@ -136,40 +183,34 @@ def get_all_themes():
 def get_all_gaps():
     return [{"gap": g, "paper": p["title"]} for p in st.session_state.papers for g in p.get("gaps", [])]
 
+# ── SIDEBAR ───────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ◎ LitLens")
-    st.markdown("---")
-    if not GENAI_AVAILABLE:
-        st.error("Run: pip install -r requirements.txt")
-    else:
-        api_key = st.text_input("Google Gemini API Key", value=st.session_state.api_key, type="password", placeholder="AIza...", help="Free at aistudio.google.com — no credit card needed")
-        st.session_state.api_key = api_key
-        if api_key:
-            st.success("API key set ✓", icon="✅")
-        else:
-            st.info("Get a free key at aistudio.google.com", icon="🔑")
+    st.markdown('<div style="font-size:11px; color:#c8f07a; font-family:DM Mono,monospace; margin-bottom:8px;">no API key needed</div>', unsafe_allow_html=True)
     st.markdown("---")
     st.markdown("**Navigation**")
-    page = st.radio("page", ["📚 Library", "📄 Add Paper", "📎 Upload PDF", "🔗 Synthesis", "🔍 Discover"], label_visibility="collapsed")
+    page = st.radio("page", ["📚 Library", "📄 Add Paper", "📎 Upload PDF", "🔗 Synthesis", "📝 Notes"], label_visibility="collapsed")
     st.markdown("---")
     papers = st.session_state.papers
     if papers:
         st.markdown(f"**{len(papers)} paper{'s' if len(papers)!=1 else ''}**")
-        search = st.text_input("Search", placeholder="Filter papers...", label_visibility="collapsed")
+        search = st.text_input("Search", placeholder="Filter...", label_visibility="collapsed")
         filtered = [p for p in papers if search.lower() in p["title"].lower() or search.lower() in p.get("authors","").lower()] if search else papers
         for p in filtered:
-            label = f"{'📄 ' if p.get('source')=='pdf' else ''}{p['title'][:45]}{'...' if len(p['title'])>45 else ''}"
+            label = f"{'📄 ' if p.get('source')=='pdf' else ''}{p['title'][:42]}{'...' if len(p['title'])>42 else ''}"
             if st.button(label, key=f"sel_{p['id']}", use_container_width=True):
                 st.session_state.selected_id = p["id"]
                 st.rerun()
+    else:
+        st.markdown('<div style="font-size:12px; color:#888885; line-height:1.7;">No papers yet.<br>Add one to get started.</div>', unsafe_allow_html=True)
 
-ready = bool(st.session_state.api_key.strip()) and GENAI_AVAILABLE
-
+# ── PAGE: LIBRARY ─────────────────────────────────────────────
 if page == "📚 Library":
     selected = next((p for p in st.session_state.papers if p["id"] == st.session_state.selected_id), None)
+
     if not selected:
         st.markdown('<div class="page-title">Library</div>', unsafe_allow_html=True)
-        st.markdown('<div style="color:#888885; font-size:14px; margin-bottom:2rem;">Select a paper from the sidebar, or add one to get started.</div>', unsafe_allow_html=True)
+        st.markdown('<div style="color:#888885;font-size:14px;margin-bottom:2rem;">Select a paper from the sidebar, or add one to get started.</div>', unsafe_allow_html=True)
         if st.session_state.papers:
             cols = st.columns(2)
             for i, p in enumerate(st.session_state.papers):
@@ -183,168 +224,206 @@ if page == "📚 Library":
         with col1:
             st.markdown(f'<div class="page-title">{p["title"]}</div>', unsafe_allow_html=True)
         with col2:
-            if st.button("🗑 Remove paper", type="secondary"):
+            if st.button("🗑 Remove", type="secondary"):
                 st.session_state.papers = [x for x in st.session_state.papers if x["id"] != p["id"]]
                 st.session_state.selected_id = None
                 st.rerun()
+
         meta_parts = [x for x in [p.get("authors"), p.get("year"), p.get("journal")] if x]
-        st.markdown(f'<div style="color:#888885; font-size:13px; font-family:DM Mono,monospace; margin-bottom:1rem;">{" · ".join(meta_parts)}</div>', unsafe_allow_html=True)
-        st.markdown(tag_html(p.get("type","empirical")), unsafe_allow_html=True)
+        st.markdown(f'<div style="color:#888885;font-size:13px;font-family:DM Mono,monospace;margin-bottom:1rem;">{" · ".join(meta_parts)}</div>', unsafe_allow_html=True)
+        st.markdown(tag_html(p.get("type","empirical")) + ('&nbsp;<span class="tag tag-pdf">PDF</span>' if p.get("source")=="pdf" else ""), unsafe_allow_html=True)
+
         st.markdown('<div class="section-title">Summary</div>', unsafe_allow_html=True)
-        if p.get("summary"):
-            st.markdown(f'<div class="summary-block">{p["summary"]}</div>', unsafe_allow_html=True)
-        else:
-            st.info("Not yet analyzed.")
+        st.markdown(f'<div class="summary-block">{p.get("summary","No summary yet.")}</div>', unsafe_allow_html=True)
+
         if p.get("findings"):
             st.markdown('<div class="section-title">Key Findings</div>', unsafe_allow_html=True)
             cols = st.columns(2)
             for i, f in enumerate(p["findings"]):
                 with cols[i % 2]:
                     st.markdown(f'<div class="finding"><div class="finding-label">finding {i+1}</div>{f}</div>', unsafe_allow_html=True)
+
+        if p.get("themes"):
+            st.markdown('<div class="section-title">Themes</div>', unsafe_allow_html=True)
+            themes_html = "".join([f'<span class="theme-chip">{t}</span>' for t in p["themes"]])
+            st.markdown(f'<div>{themes_html}</div>', unsafe_allow_html=True)
+
+        if p.get("gaps"):
+            st.markdown('<div class="section-title">Research Gaps</div>', unsafe_allow_html=True)
+            for g in p["gaps"]:
+                st.markdown(f'<div class="gap-item">{g}</div>', unsafe_allow_html=True)
+
         st.markdown('<div class="section-title">Actions</div>', unsafe_allow_html=True)
-        acol1, acol2, acol3, acol4 = st.columns(4)
-        with acol1:
-            if st.button("✦ Re-analyze", use_container_width=True, disabled=not ready):
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 Re-analyze", use_container_width=True):
                 with st.spinner("Analyzing..."):
-                    result = analyze_text(p["title"], p.get("abstract",""))
-                    p.update({k: result[k] for k in ["summary","findings","themes","gaps"] if k in result})
-                    p["analyzed"] = True
+                    text = p.get("abstract","") + " " + p.get("full_text","")
+                    result = analyze_locally(p["title"], text)
+                    p.update(result)
                 st.rerun()
-        with acol2:
-            if st.button("Implications", use_container_width=True, disabled=not ready):
-                st.session_state[f"action_{p['id']}"] = "implications"
-        with acol3:
-            if st.button("Methodology", use_container_width=True, disabled=not ready):
-                st.session_state[f"action_{p['id']}"] = "methods"
-        with acol4:
-            if st.button("Critical View", use_container_width=True, disabled=not ready):
-                st.session_state[f"action_{p['id']}"] = "critique"
-        action_key = f"action_{p['id']}"
-        if action_key in st.session_state and ready:
-            action = st.session_state[action_key]
-            prompts = {
-                "implications": f"What are the practical and theoretical implications of this paper?\n\nPaper: {p['title']}\n{p.get('abstract','')}",
-                "methods": f"Describe the methodology in detail. Strengths and weaknesses?\n\nPaper: {p['title']}\n{p.get('abstract','')}",
-                "critique": f"Provide a critical analysis. Limitations and challenges?\n\nPaper: {p['title']}\n{p.get('abstract','')}",
-            }
-            label = {"implications":"Implications","methods":"Methodology","critique":"Critical View"}[action]
-            st.markdown(f'<div class="section-title">{label}</div>', unsafe_allow_html=True)
-            with st.spinner(f"Generating..."):
-                result = call_gemini(prompts[action])
-            st.markdown(f'<div class="summary-block">{result}</div>', unsafe_allow_html=True)
-            del st.session_state[action_key]
+        with col2:
+            # Edit metadata
+            if st.button("✏️ Edit Metadata", use_container_width=True):
+                st.session_state[f"editing_{p['id']}"] = True
+
+        if st.session_state.get(f"editing_{p['id']}"):
+            with st.form(f"edit_{p['id']}"):
+                new_title = st.text_input("Title", value=p["title"])
+                new_authors = st.text_input("Authors", value=p.get("authors",""))
+                new_year = st.text_input("Year", value=p.get("year",""))
+                new_journal = st.text_input("Journal", value=p.get("journal",""))
+                new_type = st.selectbox("Type", ["empirical","methods","review","theory"], index=["empirical","methods","review","theory"].index(p.get("type","empirical")))
+                if st.form_submit_button("Save"):
+                    p.update({"title": new_title, "authors": new_authors, "year": new_year, "journal": new_journal, "type": new_type})
+                    del st.session_state[f"editing_{p['id']}"]
+                    st.rerun()
+
         if p.get("abstract"):
             with st.expander("Abstract / Full Text"):
-                st.markdown(f'<div style="font-size:13px; color:#888885; line-height:1.8;">{p["abstract"]}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div style="font-size:13px;color:#888885;line-height:1.8;">{p["abstract"][:3000]}</div>', unsafe_allow_html=True)
 
+# ── PAGE: ADD PAPER ───────────────────────────────────────────
 elif page == "📄 Add Paper":
     st.markdown('<div class="page-title">Add Paper</div>', unsafe_allow_html=True)
+    st.markdown('<div style="color:#888885;font-size:14px;margin-bottom:1.5rem;">Paste the title and abstract — analysis runs locally, no API needed.</div>', unsafe_allow_html=True)
+
     with st.form("add_paper_form"):
         title = st.text_input("Title *", placeholder="Full paper title...")
         col1, col2 = st.columns(2)
         with col1:
             authors = st.text_input("Authors", placeholder="Smith et al., 2023")
-            journal = st.text_input("Journal / Venue", placeholder="Nature, NeurIPS, etc.")
+            journal = st.text_input("Journal / Venue", placeholder="Nature, NeurIPS...")
         with col2:
             year = st.text_input("Year", placeholder="2024")
-            paper_type = st.selectbox("Type", ["empirical", "methods", "review", "theory"])
-        abstract = st.text_area("Abstract / Text *", placeholder="Paste the abstract or key excerpts here...", height=150)
-        submitted = st.form_submit_button("✦ Analyze & Add", type="primary", disabled=not ready)
+            paper_type = st.selectbox("Type", ["empirical","methods","review","theory"])
+        abstract = st.text_area("Abstract / Text *", placeholder="Paste the abstract or key excerpts...", height=160)
+        submitted = st.form_submit_button("✦ Analyze & Add", type="primary")
+
     if submitted:
         if not title or not abstract:
             st.error("Title and abstract are required.")
         else:
-            with st.spinner("Analyzing paper..."):
-                result = analyze_text(title, abstract)
-                paper = {"id": str(datetime.now().timestamp()), "title": title, "authors": authors, "year": year, "journal": journal, "type": paper_type, "abstract": abstract, "summary": result.get("summary",""), "findings": result.get("findings",[]), "themes": result.get("themes",[]), "gaps": result.get("gaps",[]), "analyzed": True, "source": "manual"}
+            with st.spinner("Analyzing..."):
+                result = analyze_locally(title, abstract)
+                paper = {
+                    "id": hashlib.md5((title+str(datetime.now())).encode()).hexdigest(),
+                    "title": title, "authors": authors, "year": year,
+                    "journal": journal, "type": paper_type, "abstract": abstract,
+                    "summary": result["summary"], "findings": result["findings"],
+                    "themes": result["themes"], "gaps": result["gaps"],
+                    "analyzed": True, "source": "manual",
+                }
                 st.session_state.papers.append(paper)
                 st.session_state.selected_id = paper["id"]
-            st.success(f"✓ '{title}' added and analyzed!")
+            st.success(f"✓ '{title}' added!")
             st.rerun()
 
+# ── PAGE: UPLOAD PDF ──────────────────────────────────────────
 elif page == "📎 Upload PDF":
     st.markdown('<div class="page-title">Upload PDF</div>', unsafe_allow_html=True)
+    st.markdown('<div style="color:#888885;font-size:14px;margin-bottom:1.5rem;">Upload PDFs — text is extracted and analyzed locally, no API needed.</div>', unsafe_allow_html=True)
+
     if not PDF_SUPPORT:
-        st.warning("pypdf is not installed. Run: pip install -r requirements.txt", icon="⚠️")
-    elif not ready:
-        st.warning("Enter your Gemini API key in the sidebar first.", icon="🔑")
+        st.warning("pypdf not installed. Run: `pip install pypdf`", icon="⚠️")
     else:
         uploaded = st.file_uploader("Drop PDF files here", type=["pdf"], accept_multiple_files=True, label_visibility="collapsed")
         if uploaded:
-            if st.button(f"✦ Analyze {len(uploaded)} PDF{'s' if len(uploaded)>1 else ''}", type="primary"):
+            if st.button(f"✦ Process {len(uploaded)} PDF{'s' if len(uploaded)>1 else ''}", type="primary"):
                 for f in uploaded:
-                    with st.spinner(f"Analyzing '{f.name}'..."):
+                    with st.spinner(f"Reading '{f.name}'..."):
                         try:
-                            result = analyze_pdf_content(f.read(), f.name)
-                            if "error" in result:
-                                st.error(f"'{f.name}': {result['error']}")
+                            file_bytes = f.read()
+                            text = extract_pdf_text(file_bytes)
+                            if not text or len(text) < 80:
+                                st.error(f"'{f.name}': No readable text — may be a scanned PDF.")
                                 continue
-                            paper = {"id": str(datetime.now().timestamp())+f.name, "title": result.get("title", f.name.replace(".pdf","")), "authors": result.get("authors",""), "year": result.get("year",""), "journal": result.get("journal",""), "type": result.get("type","empirical"), "abstract": result.get("abstract",""), "summary": result.get("summary",""), "findings": result.get("findings",[]), "themes": result.get("themes",[]), "gaps": result.get("gaps",[]), "analyzed": True, "source": "pdf", "filename": f.name}
+                            title = extract_title_from_text(text, f.name)
+                            abstract = extract_abstract(text)
+                            result = analyze_locally(title, text)
+                            paper = {
+                                "id": hashlib.md5((f.name+str(datetime.now())).encode()).hexdigest(),
+                                "title": title, "authors": "", "year": "", "journal": "",
+                                "type": "empirical", "abstract": abstract,
+                                "full_text": text[:5000],
+                                "summary": result["summary"], "findings": result["findings"],
+                                "themes": result["themes"], "gaps": result["gaps"],
+                                "analyzed": True, "source": "pdf", "filename": f.name,
+                            }
                             st.session_state.papers.append(paper)
                             st.session_state.selected_id = paper["id"]
-                            st.success(f"✓ '{paper['title']}' added!")
+                            st.success(f"✓ '{title[:60]}' added! Check Library to edit the title/authors.")
                         except Exception as e:
-                            st.error(f"Error: {str(e)}")
+                            st.error(f"Error processing '{f.name}': {str(e)}")
                 st.rerun()
 
+# ── PAGE: SYNTHESIS ───────────────────────────────────────────
 elif page == "🔗 Synthesis":
     st.markdown('<div class="page-title">Synthesis</div>', unsafe_allow_html=True)
     papers = st.session_state.papers
+
     if len(papers) < 2:
-        st.info("Add at least 2 papers to generate a synthesis.")
+        st.info("Add at least 2 papers to see the synthesis.")
     else:
+        st.markdown(f'<div style="color:#888885;font-size:14px;margin-bottom:1rem;">{len(papers)} papers in your library</div>', unsafe_allow_html=True)
+
+        # Themes
+        st.markdown('<div class="section-title">Cross-cutting Themes</div>', unsafe_allow_html=True)
         themes = get_all_themes()
         colors = ["#c8f07a","#7eb8f7","#b49ffa","#f5c97a","#ff6b6b","#5dc4a5"]
-        st.markdown('<div class="section-title">Cross-cutting Themes</div>', unsafe_allow_html=True)
         if themes:
             tcols = st.columns(min(len(themes), 3))
             for i, (theme, count) in enumerate(themes[:9]):
                 with tcols[i % 3]:
                     c = colors[i % len(colors)]
                     st.markdown(f'<div style="background:#18181c;border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:10px 14px;margin-bottom:8px;"><span style="color:{c};font-weight:600;font-size:14px;">{theme}</span><br><span style="color:#888885;font-size:11px;font-family:DM Mono,monospace;">{count} paper{"s" if count!=1 else ""}</span></div>', unsafe_allow_html=True)
-        st.markdown('<div class="section-title">Research Gaps</div>', unsafe_allow_html=True)
-        for g in get_all_gaps():
-            st.markdown(f'<div class="gap-item"><div class="gap-label">gap</div>{g["gap"]}<br><span style="font-size:11px;color:#888885;font-family:DM Mono,monospace;">from: {g["paper"][:60]}</span></div>', unsafe_allow_html=True)
-        st.markdown('<div class="section-title">Generate Literature Review</div>', unsafe_allow_html=True)
-        scol1, scol2, scol3, scol4 = st.columns(4)
-        synth_type = None
-        with scol1:
-            if st.button("✦ Full Review", use_container_width=True, disabled=not ready): synth_type = "full"
-        with scol2:
-            if st.button("Themes", use_container_width=True, disabled=not ready): synth_type = "themes"
-        with scol3:
-            if st.button("Methods", use_container_width=True, disabled=not ready): synth_type = "methods"
-        with scol4:
-            if st.button("Gaps", use_container_width=True, disabled=not ready): synth_type = "gaps"
-        if synth_type and ready:
-            paper_info = "\n\n---\n\n".join([f"Title: {p['title']}\nSummary: {p.get('summary','')}\nThemes: {', '.join(p.get('themes',[]))}\nGaps: {'; '.join(p.get('gaps',[]))}" for p in papers])
-            prompts = {"full": f"Write a formal literature review for these {len(papers)} papers with introduction, thematic synthesis, methodology comparison, and research gaps.\n\n{paper_info}", "themes": f"Identify and discuss the major cross-cutting themes across these papers.\n\n{paper_info}", "methods": f"Compare and contrast the research methodologies across these papers.\n\n{paper_info}", "gaps": f"Write a focused section on research gaps and future directions.\n\n{paper_info}"}
-            with st.spinner("Generating synthesis..."):
-                result = call_gemini(prompts[synth_type])
-            st.markdown(f'<div class="summary-block" style="white-space:pre-wrap;">{result}</div>', unsafe_allow_html=True)
-            st.download_button("⬇ Download as .txt", result, file_name="litlens-synthesis.txt", mime="text/plain")
 
-elif page == "🔍 Discover":
-    st.markdown('<div class="page-title">Discover</div>', unsafe_allow_html=True)
-    if not ready:
-        st.warning("Enter your Gemini API key in the sidebar first.", icon="🔑")
+        # Gaps
+        st.markdown('<div class="section-title">Research Gaps Identified</div>', unsafe_allow_html=True)
+        for g in get_all_gaps():
+            st.markdown(f'<div class="gap-item">{g["gap"]}<br><span style="font-size:11px;color:#888885;font-family:DM Mono,monospace;">from: {g["paper"][:55]}</span></div>', unsafe_allow_html=True)
+
+        # Paper summaries
+        st.markdown('<div class="section-title">All Summaries</div>', unsafe_allow_html=True)
+        synthesis_text = ""
+        for p in papers:
+            st.markdown(f'<div style="background:#18181c;border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px 16px;margin-bottom:10px;"><div style="font-size:14px;font-weight:500;color:#f0ede8;margin-bottom:6px;">{p["title"]}</div><div style="font-size:13px;color:#ccc8c0;line-height:1.7;">{p.get("summary","—")}</div></div>', unsafe_allow_html=True)
+            synthesis_text += f"## {p['title']}\n{p.get('summary','')}\n\nFindings:\n" + "\n".join(f"- {f}" for f in p.get("findings",[])) + "\n\n"
+
+        st.markdown('<div class="section-title">Export</div>', unsafe_allow_html=True)
+        st.download_button("⬇ Download All Summaries (.txt)", synthesis_text, file_name="litlens-synthesis.txt", mime="text/plain")
+
+# ── PAGE: NOTES ───────────────────────────────────────────────
+elif page == "📝 Notes":
+    st.markdown('<div class="page-title">Notes</div>', unsafe_allow_html=True)
+    st.markdown('<div style="color:#888885;font-size:14px;margin-bottom:1.5rem;">Your personal research notes, saved in this session.</div>', unsafe_allow_html=True)
+
+    if not st.session_state.papers:
+        st.info("Add papers first to attach notes to them.")
     else:
-        query = st.text_area("Your research topic", placeholder="e.g. I'm studying transformer attention for clinical NLP...", height=100)
-        dcol1, dcol2, dcol3, dcol4 = st.columns(4)
-        disc_type = None
-        with dcol1:
-            if st.button("✦ Recommendations", use_container_width=True): disc_type = "general"
-        with dcol2:
-            if st.button("Seminal Papers", use_container_width=True): disc_type = "seminal"
-        with dcol3:
-            if st.button("Recent Advances", use_container_width=True): disc_type = "recent"
-        with dcol4:
-            if st.button("Methods & Tools", use_container_width=True): disc_type = "methods"
-        if disc_type and query.strip():
-            context = f"\nResearcher has: {', '.join(p['title'] for p in st.session_state.papers)}." if st.session_state.papers else ""
-            prompts = {"general": f"Studying: '{query}'{context}\nProvide: 5-8 key papers (with authors/year), 3 databases/tools, and key search terms.", "seminal": f"List the most important seminal papers for: '{query}'{context}\nFor each: title, authors, year, why it matters.", "recent": f"Most important advances (2020-2025) in: '{query}'{context}\nList key papers and trends.", "methods": f"Best methodological approaches for: '{query}'{context}\nRecommend methods, tools, datasets."}
-            with st.spinner("Searching..."):
-                result = call_gemini(prompts[disc_type])
-            st.markdown(f'<div class="summary-block" style="white-space:pre-wrap;">{result}</div>', unsafe_allow_html=True)
-        elif disc_type:
-            st.warning("Please describe your research topic first.")
+        paper_titles = {p["id"]: p["title"] for p in st.session_state.papers}
+        selected_for_note = st.selectbox("Select paper", options=list(paper_titles.keys()), format_func=lambda x: paper_titles[x])
+
+        existing = st.session_state.notes.get(selected_for_note, "")
+        new_note = st.text_area("Your notes", value=existing, height=200, placeholder="Write your thoughts, critiques, connections to other work...")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("💾 Save Note", type="primary", use_container_width=True):
+                st.session_state.notes[selected_for_note] = new_note
+                st.success("Saved!")
+        with col2:
+            if st.button("🗑 Clear Note", use_container_width=True):
+                st.session_state.notes[selected_for_note] = ""
+                st.rerun()
+
+        # Show all notes
+        if any(v for v in st.session_state.notes.values()):
+            st.markdown('<div class="section-title">All Notes</div>', unsafe_allow_html=True)
+            all_notes_text = ""
+            for pid, note in st.session_state.notes.items():
+                if note and pid in paper_titles:
+                    st.markdown(f'<div style="background:#18181c;border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px 16px;margin-bottom:10px;"><div style="font-size:13px;font-weight:500;color:#c8f07a;margin-bottom:6px;">{paper_titles[pid]}</div><div style="font-size:13px;color:#ccc8c0;line-height:1.7;white-space:pre-wrap;">{note}</div></div>', unsafe_allow_html=True)
+                    all_notes_text += f"## {paper_titles[pid]}\n{note}\n\n"
+            if all_notes_text:
+                st.download_button("⬇ Download All Notes", all_notes_text, file_name="litlens-notes.txt", mime="text/plain")
