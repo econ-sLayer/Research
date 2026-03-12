@@ -63,12 +63,12 @@ def load_data():
                 return json.load(f)
         except Exception:
             pass
-    return {"papers": [], "notes": {}}
+    return {"papers": [], "notes": {}, "repos": [{"id":"r1","name":"Unassigned","color":"#888885"}], "paper_repos": {}}
 
 def save_data():
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump({"papers": st.session_state.papers, "notes": st.session_state.notes, "selected_id": st.session_state.selected_id}, f, ensure_ascii=False, indent=2)
+            json.dump({"papers": st.session_state.papers, "notes": st.session_state.notes, "selected_id": st.session_state.selected_id, "repos": st.session_state.repos, "paper_repos": st.session_state.paper_repos}, f, ensure_ascii=False, indent=2)
     except Exception as e:
         st.warning(f"Could not save data: {e}")
 
@@ -78,6 +78,8 @@ if "loaded" not in st.session_state:
     st.session_state.papers = data.get("papers", [])
     st.session_state.notes = data.get("notes", {})
     st.session_state.selected_id = data.get("selected_id", None)
+    st.session_state.repos = data.get("repos", [{"id":"r1","name":"Unassigned","color":"#888885"}])
+    st.session_state.paper_repos = data.get("paper_repos", {})
     st.session_state.loaded = True
 if "selected_id" not in st.session_state:
     st.session_state.selected_id = None
@@ -322,7 +324,7 @@ with st.sidebar:
     st.markdown(f'<div style="font-size:10px; color:#888885; font-family:DM Mono,monospace; margin-bottom:8px;">💾 {"data saved" if data_exists else "no saved data yet"}</div>', unsafe_allow_html=True)
     st.markdown("---")
     st.markdown("**Navigation**")
-    page = st.radio("page", ["📚 Library", "📄 Add Paper", "📎 Upload PDF", "🔗 Synthesis", "📝 Notes"], label_visibility="collapsed")
+    page = st.radio("page", ["📚 Library", "🗂 Board", "📄 Add Paper", "📎 Upload PDF", "🔗 Synthesis", "📝 Notes"], label_visibility="collapsed")
     st.markdown("---")
     papers = st.session_state.papers
     if papers:
@@ -419,6 +421,218 @@ if page == "📚 Library":
         if p.get("abstract"):
             with st.expander("Abstract / Full Text"):
                 st.markdown(f'<div style="font-size:13px;color:#888885;line-height:1.8;">{p["abstract"][:3000]}</div>', unsafe_allow_html=True)
+
+
+
+# ── PAGE: BOARD ───────────────────────────────────────────────
+elif page == "🗂 Board":
+    import streamlit.components.v1 as components
+
+    st.markdown('<div class="page-title">Board</div>', unsafe_allow_html=True)
+    st.markdown('<div style="color:#888885;font-size:13px;margin-bottom:1.2rem;">Drag papers into repositories. Use the panel below to create your own groups.</div>', unsafe_allow_html=True)
+
+    papers     = st.session_state.papers
+    repos      = st.session_state.repos
+    paper_repos= st.session_state.paper_repos
+
+    if not papers:
+        st.info("Add papers first, then come here to organise them into repositories.")
+    else:
+        # Ensure every paper has a repo assignment
+        for p in papers:
+            if p["id"] not in paper_repos:
+                paper_repos[p["id"]] = "r1"
+
+        # ── Manage repositories ───────────────────────────────
+        with st.expander("⚙️  Manage repositories"):
+            mc1, mc2, mc3 = st.columns([3, 1, 1])
+            with mc1:
+                new_name = st.text_input("New repository name", placeholder="e.g. European studies, IV methods…", key="new_repo_name")
+            with mc2:
+                new_color = st.color_picker("Colour", "#c8f07a", key="new_repo_color")
+            with mc3:
+                st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                if st.button("＋ Create", use_container_width=True):
+                    if new_name.strip():
+                        nid = "r_" + str(len(repos)) + "_" + new_name[:10].replace(" ", "")
+                        st.session_state.repos.append({"id": nid, "name": new_name.strip(), "color": new_color})
+                        save_data()
+                        st.rerun()
+
+            deletable = [r for r in st.session_state.repos if r["id"] != "r1"]
+            if deletable:
+                del_choice = st.selectbox("Delete a repository", ["—"] + [r["name"] for r in deletable], key="del_repo")
+                if st.button("🗑  Delete", key="del_repo_btn") and del_choice != "—":
+                    del_id = next(r["id"] for r in deletable if r["name"] == del_choice)
+                    st.session_state.repos = [r for r in st.session_state.repos if r["id"] != del_id]
+                    for pid in list(st.session_state.paper_repos):
+                        if st.session_state.paper_repos[pid] == del_id:
+                            st.session_state.paper_repos[pid] = "r1"
+                    save_data()
+                    st.rerun()
+
+        # Re-read after possible changes
+        repos       = st.session_state.repos
+        paper_repos = st.session_state.paper_repos
+
+        # ── Drag-and-drop board (HTML component) ─────────────
+        import json as _json
+
+        cards_data = _json.dumps([{
+            "id":      p["id"],
+            "title":   p["title"],
+            "authors": p.get("authors", ""),
+            "year":    p.get("year", ""),
+            "type":    p.get("type", "empirical"),
+            "source":  p.get("source", "manual"),
+            "summary": (p.get("summary", "")[:110] + "…") if p.get("summary") else "",
+            "repo":    paper_repos.get(p["id"], "r1"),
+        } for p in papers])
+
+        repos_data = _json.dumps(repos)
+
+        board_html = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+*{box-sizing:border-box;margin:0;padding:0;font-family:Inter,sans-serif}
+body{background:#0e0e10;color:#f0ede8;padding:6px}
+.board{display:flex;gap:12px;overflow-x:auto;padding-bottom:16px;min-height:480px;align-items:flex-start}
+.col{min-width:220px;max-width:220px;background:#18181c;border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:11px;display:flex;flex-direction:column;gap:7px;transition:border-color .15s,background .15s}
+.col.over{border-color:rgba(255,255,255,0.35);background:#22222a}
+.col-header{font-size:11px;font-weight:600;font-family:'DM Mono',monospace;letter-spacing:.07em;text-transform:uppercase;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,0.07);display:flex;align-items:center;gap:7px;margin-bottom:2px}
+.dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+.cnt{opacity:.4;font-size:10px;margin-left:auto}
+.card{background:#0e0e10;border:1px solid rgba(255,255,255,0.09);border-radius:9px;padding:9px 11px;cursor:grab;transition:border-color .12s,transform .1s,opacity .1s;user-select:none}
+.card:hover{border-color:rgba(255,255,255,0.22);transform:translateY(-2px)}
+.card.dragging{opacity:.35;transform:rotate(2deg) scale(.97)}
+.ctitle{font-size:12px;font-weight:500;color:#f0ede8;line-height:1.4;margin-bottom:3px}
+.cmeta{font-size:10px;color:#888885;font-family:'DM Mono',monospace;margin-bottom:4px}
+.csumm{font-size:11px;color:#77746e;line-height:1.45;margin-bottom:5px}
+.tag{display:inline-block;padding:1px 7px;border-radius:100px;font-size:10px;font-family:'DM Mono',monospace;font-weight:500;margin-right:3px}
+.tag-empirical{background:rgba(245,201,122,.12);color:#f5c97a}
+.tag-methods{background:rgba(126,184,247,.12);color:#7eb8f7}
+.tag-review{background:rgba(200,240,122,.12);color:#c8f07a}
+.tag-theory{background:rgba(180,159,250,.12);color:#b49ffa}
+.tag-pdf{background:rgba(126,184,247,.12);color:#7eb8f7}
+.empty{border:1.5px dashed rgba(255,255,255,0.1);border-radius:9px;height:56px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#444;font-family:'DM Mono',monospace}
+#savebar{position:fixed;bottom:14px;right:14px;display:flex;gap:8px;align-items:center;z-index:99}
+#savebtn{background:#c8f07a;color:#0e0e10;border:none;border-radius:8px;padding:8px 18px;font-size:13px;font-weight:600;cursor:pointer;display:none}
+#savebtn.on{display:block}
+#savedmsg{background:#18181c;color:#c8f07a;border:1px solid rgba(200,240,122,.3);border-radius:8px;padding:8px 16px;font-size:12px;font-family:'DM Mono',monospace;display:none}
+#savedmsg.on{display:block}
+</style>
+</head>
+<body>
+<div class="board" id="board"></div>
+<div id="savebar">
+  <div id="savedmsg">✓ Saved!</div>
+  <button id="savebtn" onclick="doSave()">💾 Save</button>
+</div>
+<script>
+var papers=PAPERS_DATA;
+var repos=REPOS_DATA;
+var assign={};
+papers.forEach(function(p){assign[p.id]=p.repo});
+var dragging=null,dirty=false;
+
+function build(){
+  var board=document.getElementById('board');
+  board.innerHTML='';
+  repos.forEach(function(repo){
+    var col=document.createElement('div');
+    col.className='col';
+    col.dataset.rid=repo.id;
+    var rp=papers.filter(function(p){return assign[p.id]===repo.id});
+    col.innerHTML='<div class="col-header"><div class="dot" style="background:'+repo.color+'"></div>'+repo.name+'<span class="cnt">'+rp.length+'</span></div>';
+    if(rp.length===0){
+      var em=document.createElement('div');
+      em.className='empty';
+      em.textContent='drop here';
+      col.appendChild(em);
+    }
+    rp.forEach(function(p){
+      var c=document.createElement('div');
+      c.className='card';
+      c.draggable=true;
+      c.dataset.pid=p.id;
+      var meta=(p.authors?p.authors.substring(0,28):'')+(p.year?' · '+p.year:'');
+      var pdfTag=p.source==='pdf'?'<span class="tag tag-pdf">PDF</span>':'';
+      c.innerHTML='<div class="ctitle">'+p.title+'</div>'
+        +(meta?'<div class="cmeta">'+meta+'</div>':'')
+        +(p.summary?'<div class="csumm">'+p.summary+'</div>':'')
+        +'<span class="tag tag-'+p.type+'">'+p.type+'</span>'+pdfTag;
+      c.addEventListener('dragstart',function(e){
+        dragging=p.id;
+        setTimeout(function(){c.classList.add('dragging')},0);
+        e.dataTransfer.effectAllowed='move';
+      });
+      c.addEventListener('dragend',function(){
+        c.classList.remove('dragging');
+        dragging=null;
+        document.querySelectorAll('.col').forEach(function(x){x.classList.remove('over')});
+      });
+      col.appendChild(c);
+    });
+    col.addEventListener('dragover',function(e){e.preventDefault();col.classList.add('over')});
+    col.addEventListener('dragleave',function(){col.classList.remove('over')});
+    col.addEventListener('drop',function(e){
+      e.preventDefault();col.classList.remove('over');
+      if(dragging && assign[dragging]!==repo.id){
+        assign[dragging]=repo.id;
+        dirty=true;
+        document.getElementById('savebtn').classList.add('on');
+        build();
+      }
+    });
+    board.appendChild(col);
+  });
+}
+
+function doSave(){
+  window.parent.postMessage({type:'litlens_assign',data:JSON.stringify(assign)},'*');
+  document.getElementById('savebtn').classList.remove('on');
+  document.getElementById('savedmsg').classList.add('on');
+  setTimeout(function(){document.getElementById('savedmsg').classList.remove('on')},2000);
+  dirty=false;
+}
+
+build();
+</script>
+</body>
+</html>"""
+
+        board_html = board_html.replace("PAPERS_DATA", cards_data).replace("REPOS_DATA", repos_data)
+        components.html(board_html, height=580, scrolling=True)
+
+        # ── Fallback assignment (selectboxes, always visible) ─
+        st.markdown('<div class="section-title" style="margin-top:1.5rem;">Assign papers to repositories</div>', unsafe_allow_html=True)
+        st.markdown('<div style="font-size:12px;color:#888885;margin-bottom:10px;line-height:1.6;">Use the drag-and-drop board above, or assign directly here. Changes save instantly.</div>', unsafe_allow_html=True)
+
+        repo_opts   = {r["id"]: r["name"] for r in repos}
+        repo_keys   = list(repo_opts.keys())
+        changed     = False
+        cols2 = st.columns(2)
+        for i, p in enumerate(papers):
+            with cols2[i % 2]:
+                cur = paper_repos.get(p["id"], "r1")
+                cur_idx = repo_keys.index(cur) if cur in repo_keys else 0
+                choice = st.selectbox(
+                    (p["title"][:48] + "…") if len(p["title"]) > 48 else p["title"],
+                    options=repo_keys,
+                    format_func=lambda x: repo_opts[x],
+                    index=cur_idx,
+                    key="ra_" + p["id"],
+                )
+                if choice != cur:
+                    st.session_state.paper_repos[p["id"]] = choice
+                    changed = True
+
+        if changed:
+            save_data()
+            st.rerun()
+
 
 # ── PAGE: ADD PAPER ───────────────────────────────────────────
 elif page == "📄 Add Paper":
