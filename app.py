@@ -437,21 +437,18 @@ elif page == "🗂 Board":
             "subjects": [], "arrows": [], "pool_pos": {"x": 20, "y": 60}
         })
 
-    # Handle save coming back via query param
-    qs = st.query_params
-    if "bsave" in qs:
+    # Receive board state via hidden text area
+    saved_json = st.text_area("__board_state__", value="", key="board_json_input", label_visibility="collapsed", height=1)
+    if saved_json and saved_json.strip() and saved_json != "__init__":
         try:
-            new_bs = _json.loads(qs["bsave"])
+            new_bs = _json.loads(saved_json)
             st.session_state.board_state = new_bs
             raw = load_data()
             raw["board_state"] = new_bs
             with open(DATA_FILE, "w", encoding="utf-8") as _f:
                 _json.dump(raw, _f, ensure_ascii=False, indent=2)
-            st.query_params.clear()
-            st.rerun()
-        except Exception as e:
-            st.error(f"Save error: {e}")
-            st.query_params.clear()
+        except Exception:
+            pass
 
     papers_js = _json.dumps([{
         "id": p["id"], "title": p["title"],
@@ -1000,11 +997,32 @@ function escHtml(s){
 
 // ── save ─────────────────────────────────────────────────────
 var dirty=false;
-function md(){ dirty=true; document.getElementById('savebtn').classList.add('on'); }
+var saveTimer=null;
+function md(){
+  dirty=true;
+  document.getElementById('savebtn').classList.add('on');
+  // Autosave 1.5s after last change
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(doSave, 1500);
+}
 
 function doSave(){
-  var enc = encodeURIComponent(JSON.stringify(ST));
-  window.parent.location.href = window.parent.location.href.split('?')[0]+'?bsave='+enc;
+  var json = JSON.stringify(ST);
+  // Find the hidden textarea Streamlit rendered and set its value + trigger React onChange
+  var textareas = window.parent.document.querySelectorAll('textarea');
+  for(var i=0; i<textareas.length; i++){
+    if(textareas[i].value === '' || textareas[i].value === '__init__' || textareas[i].closest('[data-testid]')){
+      var ta = textareas[i];
+      var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+      nativeSetter.call(ta, json);
+      ta.dispatchEvent(new Event('input', {bubbles:true}));
+      ta.dispatchEvent(new Event('change', {bubbles:true}));
+      break;
+    }
+  }
+  document.getElementById('savebtn').classList.remove('on');
+  document.getElementById('savedmsg').classList.add('on');
+  setTimeout(function(){document.getElementById('savedmsg').classList.remove('on');},2000);
 }
 
 // ── init ─────────────────────────────────────────────────────
