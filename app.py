@@ -463,18 +463,8 @@ elif page == "🗂 Board":
 body{background:#0e0e10;overflow:hidden}
 
 /* ── toolbar ── */
-#bar{position:fixed;top:0;left:0;right:0;height:44px;background:#18181c;
-  border-bottom:1px solid rgba(255,255,255,.08);display:flex;align-items:center;
-  gap:6px;padding:0 12px;z-index:300}
-#bar button{background:#0e0e10;color:#f0ede8;border:1px solid rgba(255,255,255,.12);
-  border-radius:7px;padding:5px 11px;font-size:12px;cursor:pointer;white-space:nowrap}
-#bar button:hover{background:#222}
-#bar button.on{background:#c8f07a;color:#0e0e10;border-color:#c8f07a}
-.div{width:1px;height:22px;background:rgba(255,255,255,.08);flex-shrink:0}
-#hint{font-size:11px;color:#444;font-family:DM Mono,monospace;margin-left:auto;padding-right:4px}
-
 /* ── canvas ── */
-#wrap{position:fixed;top:44px;left:0;right:0;bottom:0;overflow:hidden;cursor:default}
+#wrap{position:fixed;top:0;left:0;right:0;bottom:0;overflow:hidden;cursor:default}
 #cv{position:absolute;top:0;left:0;width:5000px;height:4000px;transform-origin:0 0}
 #sv{position:absolute;top:0;left:0;width:5000px;height:4000px;pointer-events:none;z-index:1}
 #sv.am{pointer-events:all;cursor:crosshair}
@@ -564,17 +554,6 @@ body{background:#0e0e10;overflow:hidden}
 </style></head>
 <body>
 
-<div id="bar">
-  <span style="font-size:12px;color:#888885;font-family:DM Mono,monospace;padding-right:4px">◎ Board</span>
-  <div class="div"></div>
-  <button onclick="addSubject()">＋ Subject</button>
-  <button id="bam" onclick="toggleAM()">↗ Connect</button>
-  <button id="bda" style="display:none" onclick="delArrow()">🗑 Arrow</button>
-  <div class="div"></div>
-  <button onclick="resetView()">⊡ Fit</button>
-  <span id="hint">drag cards from 📥 pool into any subfield drop zone</span>
-</div>
-
 <div id="wrap">
   <div id="cv">
     <svg id="sv"><defs>
@@ -585,7 +564,13 @@ body{background:#0e0e10;overflow:hidden}
         <polygon points="0 0,8 3,0 6" fill="#c8f07a"/>
       </marker>
     </defs></svg>
-    <div id="pool">
+    <div id="ctrlbar" style="position:absolute;top:12px;left:12px;z-index:50;display:flex;gap:6px;align-items:center">
+      <button style="background:#18181c;color:#f0ede8;border:1px solid rgba(255,255,255,.15);border-radius:7px;padding:5px 11px;font-size:12px;cursor:pointer" onclick="addSubject()">＋ Subject</button>
+      <button id="bam" style="background:#18181c;color:#f0ede8;border:1px solid rgba(255,255,255,.15);border-radius:7px;padding:5px 11px;font-size:12px;cursor:pointer" onclick="toggleAM()">↗ Connect</button>
+      <button id="bda" style="display:none;background:#18181c;color:#f0ede8;border:1px solid rgba(255,255,255,.15);border-radius:7px;padding:5px 11px;font-size:12px;cursor:pointer" onclick="delArrow()">🗑 Arrow</button>
+      <button style="background:#18181c;color:#f0ede8;border:1px solid rgba(255,255,255,.15);border-radius:7px;padding:5px 11px;font-size:12px;cursor:pointer" onclick="resetView()">⊡ Fit</button>
+    </div>
+    <div id="pool" style="top:56px">
       <div id="ph">📥 Unassigned <span id="pcnt"></span></div>
       <div id="pcards"></div>
     </div>
@@ -712,6 +697,27 @@ function makeCard(p, sid, sfid){
     document.querySelectorAll('.node').forEach(function(n){ n.classList.remove('drop-target'); });
     document.querySelectorAll('.sf').forEach(function(s){ s.classList.remove('drop-target'); });
   });
+  // Remove button (only for cards inside a subfield, not in the pool)
+  if(sid && sfid){
+    var removeBtn = document.createElement('button');
+    removeBtn.textContent = '✕';
+    removeBtn.title = 'Remove from subfield';
+    removeBtn.style.cssText = 'position:absolute;top:4px;right:4px;background:none;border:none;color:#555;cursor:pointer;font-size:11px;padding:1px 4px;border-radius:3px;opacity:0;transition:opacity .15s';
+    removeBtn.addEventListener('mousedown', function(e){ e.stopPropagation(); e.preventDefault(); });
+    removeBtn.addEventListener('click', function(e){
+      e.stopPropagation();
+      var subj = ST.subjects.find(function(x){ return x.id===sid; });
+      if(subj){
+        var sf2 = subj.subfields.find(function(x){ return x.id===sfid; });
+        if(sf2) sf2.papers = sf2.papers.filter(function(x){ return x!==p.id; });
+      }
+      md(); render();
+    });
+    d.style.position = 'relative';
+    d.appendChild(removeBtn);
+    d.addEventListener('mouseenter', function(){ removeBtn.style.opacity='1'; });
+    d.addEventListener('mouseleave', function(){ removeBtn.style.opacity='0'; });
+  }
   return d;
 }
 
