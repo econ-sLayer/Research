@@ -785,7 +785,123 @@ render();
 
     HTML = HTML.replace('__PAPERS__', papers_for_js).replace('__STATE__', board_state_js)
     components.html(HTML, height=700, scrolling=False)
-    st.caption("💡 ＋ Subject to add a node · drag header to move · ↗ Connect then click two subjects for arrows · click arrow to select then 🗑 to delete · drag paper cards into subfield drop zones · 💾 Save board to persist")
+    st.caption("💡 ＋ Subject to add a node · drag header to move · ↗ Connect then click two subjects for arrows · click arrow to select then 🗑 to delete · 💾 Save board to persist")
+
+    # ── Quick assign panel ────────────────────────────────────
+    st.markdown('<div class="section-title" style="margin-top:1.5rem;">📌 Assign papers to subfields</div>', unsafe_allow_html=True)
+
+    bs = st.session_state.board_state
+    subjects = bs.get("subjects", [])
+
+    if not subjects:
+        st.info("Create a Subject on the board first, then assign papers here.")
+    elif not papers:
+        st.info("No papers in your library yet.")
+    else:
+        # Build list of unassigned papers
+        assigned_ids = set()
+        for s in subjects:
+            for sf in s.get("subfields", []):
+                for pid in sf.get("papers", []):
+                    assigned_ids.add(pid)
+
+        unassigned = [p for p in papers if p["id"] not in assigned_ids]
+        assigned   = [p for p in papers if p["id"] in assigned_ids]
+
+        # Show unassigned count
+        col_info1, col_info2 = st.columns(2)
+        with col_info1:
+            st.markdown(f'<div style="font-size:12px;color:#888885;font-family:DM Mono,monospace;">📥 Unassigned: <span style="color:#f5c97a">{len(unassigned)}</span></div>', unsafe_allow_html=True)
+        with col_info2:
+            st.markdown(f'<div style="font-size:12px;color:#888885;font-family:DM Mono,monospace;">✓ Assigned: <span style="color:#c8f07a">{len(assigned)}</span></div>', unsafe_allow_html=True)
+
+        if unassigned:
+            st.markdown('<div style="height:10px"></div>', unsafe_allow_html=True)
+            ac1, ac2, ac3, ac4 = st.columns([3, 2, 2, 1])
+
+            with ac1:
+                paper_choice = st.selectbox(
+                    "Paper",
+                    options=[p["id"] for p in unassigned],
+                    format_func=lambda x: next((p["title"][:55]+"…" if len(p["title"])>55 else p["title"] for p in unassigned if p["id"]==x), x),
+                    label_visibility="collapsed",
+                    key="assign_paper"
+                )
+
+            # Build subject options
+            subj_options = {s["id"]: s["name"] for s in subjects}
+            with ac2:
+                subj_choice = st.selectbox(
+                    "Subject",
+                    options=list(subj_options.keys()),
+                    format_func=lambda x: subj_options[x],
+                    label_visibility="collapsed",
+                    key="assign_subject"
+                )
+
+            # Build subfield options for chosen subject
+            chosen_subj = next((s for s in subjects if s["id"] == subj_choice), None)
+            sf_options = {}
+            if chosen_subj:
+                for sf in chosen_subj.get("subfields", []):
+                    sf_options[sf["id"]] = sf["name"]
+
+            with ac3:
+                if sf_options:
+                    sf_choice = st.selectbox(
+                        "Subfield",
+                        options=list(sf_options.keys()),
+                        format_func=lambda x: sf_options[x],
+                        label_visibility="collapsed",
+                        key="assign_sf"
+                    )
+                else:
+                    st.markdown('<div style="font-size:12px;color:#888885;padding-top:8px;">No subfields yet</div>', unsafe_allow_html=True)
+                    sf_choice = None
+
+            with ac4:
+                if st.button("＋ Assign", type="primary", use_container_width=True, disabled=not sf_choice):
+                    # Add paper to subfield
+                    for s in subjects:
+                        if s["id"] == subj_choice:
+                            for sf in s.get("subfields", []):
+                                if sf["id"] == sf_choice:
+                                    if paper_choice not in sf["papers"]:
+                                        sf["papers"].append(paper_choice)
+                    st.session_state.board_state = bs
+                    # Save to disk
+                    raw = load_data()
+                    raw["board_state"] = bs
+                    import os as _os2
+                    import json as _json2
+                    with open(DATA_FILE,"w",encoding="utf-8") as _f2:
+                        _json2.dump(raw, _f2, ensure_ascii=False, indent=2)
+                    st.rerun()
+        else:
+            st.success("All papers are assigned to subfields!")
+
+        # Show current assignments
+        if assigned:
+            with st.expander(f"📋 View current assignments ({len(assigned)} papers)"):
+                for s in subjects:
+                    for sf in s.get("subfields", []):
+                        sf_papers = [p for p in papers if p["id"] in sf.get("papers", [])]
+                        if sf_papers:
+                            st.markdown(f'<div style="font-size:11px;color:#c8f07a;font-family:DM Mono,monospace;margin:8px 0 4px;">{s["name"]} › {sf["name"]}</div>', unsafe_allow_html=True)
+                            for p in sf_papers:
+                                rc1, rc2 = st.columns([5,1])
+                                with rc1:
+                                    st.markdown(f'<div style="font-size:12px;color:#ccc8c0;padding:2px 0">{p["title"][:60]}{"…" if len(p["title"])>60 else ""}</div>', unsafe_allow_html=True)
+                                with rc2:
+                                    if st.button("✕", key=f"unassign_{s['id']}_{sf['id']}_{p['id']}", help="Remove from subfield"):
+                                        sf["papers"] = [x for x in sf["papers"] if x != p["id"]]
+                                        st.session_state.board_state = bs
+                                        raw2 = load_data()
+                                        raw2["board_state"] = bs
+                                        import json as _json3
+                                        with open(DATA_FILE,"w",encoding="utf-8") as _f3:
+                                            _json3.dump(raw2, _f3, ensure_ascii=False, indent=2)
+                                        st.rerun()
 
 
 # ── PAGE: ADD PAPER ───────────────────────────────────────────
