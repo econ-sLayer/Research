@@ -1,19 +1,36 @@
 import streamlit as st
 import json
-import re
-import io
-import hashlib
 import os
+import re
+import time
+import hashlib
 from datetime import datetime
 
+# ── optional deps ─────────────────────────────────────────────
 try:
-    import pypdf
-    PDF_SUPPORT = True
+    from scholarly import scholarly
+    SCHOLARLY_OK = True
 except ImportError:
-    PDF_SUPPORT = False
+    SCHOLARLY_OK = False
+
+try:
+    import numpy as np
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.cluster import KMeans
+    from sklearn.decomposition import PCA
+    from sklearn.metrics import silhouette_score
+    SKLEARN_OK = True
+except ImportError:
+    SKLEARN_OK = False
+
+try:
+    import requests
+    REQUESTS_OK = True
+except ImportError:
+    REQUESTS_OK = False
 
 st.set_page_config(
-    page_title="LitLens — Research Assistant",
+    page_title="PaperCluster",
     page_icon="◎",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -21,34 +38,27 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Mono:wght@400;500&display=swap');
-html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-[data-testid="stSidebar"] { background: #18181c; border-right: 1px solid rgba(255,255,255,0.07); }
-[data-testid="stSidebar"] * { color: #f0ede8 !important; }
-.stApp { background: #0e0e10; color: #f0ede8; }
-#MainMenu, footer, header { visibility: hidden; }
-.block-container { padding-top: 1.5rem; }
-.paper-card { background: #18181c; border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 0.75rem; }
-.paper-card h4 { color: #f0ede8; margin: 0 0 4px; font-size: 15px; }
-.paper-card .meta { color: #888885; font-size: 12px; font-family: 'DM Mono', monospace; }
-.finding { background: #18181c; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 10px 14px; margin-bottom: 6px; font-size: 14px; color: #ccc8c0; line-height: 1.7; }
-.finding-label { font-family: 'DM Mono', monospace; font-size: 10px; color: #c8f07a; margin-bottom: 4px; }
-.tag { display: inline-block; padding: 2px 10px; border-radius: 100px; font-size: 11px; font-family: 'DM Mono', monospace; font-weight: 500; margin-right: 4px; }
-.tag-empirical { background: rgba(245,201,122,0.1); color: #f5c97a; }
-.tag-methods { background: rgba(126,184,247,0.1); color: #7eb8f7; }
-.tag-review { background: rgba(200,240,122,0.1); color: #c8f07a; }
-.tag-theory { background: rgba(180,159,250,0.1); color: #b49ffa; }
-.tag-pdf { background: rgba(126,184,247,0.1); color: #7eb8f7; }
-.gap-item { background: rgba(255,107,107,0.07); border: 1px solid rgba(255,107,107,0.15); border-radius: 8px; padding: 10px 14px; margin-bottom: 6px; font-size: 13px; color: #e8c5c5; line-height: 1.6; }
-.section-title { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #888885; font-family: 'DM Mono', monospace; margin: 1.25rem 0 0.6rem; }
-.page-title { font-family: 'Instrument Serif', serif; font-size: 2rem; letter-spacing: -0.01em; color: #f0ede8; margin-bottom: 0.25rem; }
-.summary-block { background: #18181c; border: 1px solid rgba(255,255,255,0.07); border-radius: 12px; padding: 1rem 1.25rem; font-size: 14px; line-height: 1.8; color: #ccc8c0; }
-.theme-chip { display:inline-block; background:#18181c; border:1px solid rgba(255,255,255,0.1); border-radius:100px; padding:4px 12px; font-size:12px; color:#c8f07a; margin:3px; }
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap');
+html,body,[class*="css"]{font-family:'Inter',sans-serif;}
+[data-testid="stSidebar"]{background:#18181c;border-right:1px solid rgba(255,255,255,0.07);}
+[data-testid="stSidebar"] *{color:#f0ede8 !important;}
+.stApp{background:#0e0e10;color:#f0ede8;}
+#MainMenu,footer,header{visibility:hidden;}
+.block-container{padding-top:1.5rem;}
+.page-title{font-size:1.8rem;font-weight:700;color:#f0ede8;margin-bottom:0.25rem;}
+.section-title{font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#888885;font-family:'DM Mono',monospace;margin:1.25rem 0 0.6rem;}
+.paper-card{background:#18181c;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:0.75rem 1rem;margin-bottom:0.5rem;}
+.paper-card h5{color:#f0ede8;margin:0 0 3px;font-size:13px;}
+.paper-card .meta{color:#888885;font-size:11px;font-family:'DM Mono',monospace;}
+.cluster-chip{display:inline-block;padding:3px 12px;border-radius:100px;font-size:11px;font-family:'DM Mono',monospace;font-weight:500;margin:2px;}
+.stat-box{background:#18181c;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:1rem;text-align:center;}
+.stat-num{font-size:1.8rem;font-weight:700;color:#c8f07a;}
+.stat-label{font-size:11px;color:#888885;font-family:'DM Mono',monospace;text-transform:uppercase;letter-spacing:0.07em;}
 </style>
 """, unsafe_allow_html=True)
 
-# ── Persistent storage ────────────────────────────────────────
-DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "litlens_data.json")
+# ── persistence ───────────────────────────────────────────────
+DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "papercluster_data.json")
 
 def load_data():
     if os.path.exists(DATA_FILE):
@@ -57,944 +67,723 @@ def load_data():
                 return json.load(f)
         except Exception:
             pass
-    return {"papers": [], "notes": {}, "selected_id": None,
-            "repos": [], "paper_repos": {}, "board_state": {}}
+    return {"papers": [], "clusters": {}, "cluster_labels": {}}
 
 def save_data():
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump({
                 "papers": st.session_state.papers,
-                "notes": st.session_state.notes,
-                "selected_id": st.session_state.selected_id,
-                "repos": st.session_state.get("repos", []),
-                "paper_repos": st.session_state.get("paper_repos", {}),
-                "board_state": st.session_state.get("board_state", {}),
+                "clusters": st.session_state.clusters,
+                "cluster_labels": st.session_state.cluster_labels,
             }, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        st.warning(f"Could not save: {e}")
+        st.warning(f"Save error: {e}")
 
-# ── Session state init ────────────────────────────────────────
+# ── session init ──────────────────────────────────────────────
 if "loaded" not in st.session_state:
     data = load_data()
     st.session_state.papers = data.get("papers", [])
-    st.session_state.notes = data.get("notes", {})
-    st.session_state.selected_id = data.get("selected_id", None)
-    st.session_state.repos = data.get("repos", [])
-    st.session_state.paper_repos = data.get("paper_repos", {})
-    st.session_state.board_state = data.get("board_state", {})
+    st.session_state.clusters = data.get("clusters", {})
+    st.session_state.cluster_labels = data.get("cluster_labels", {})
     st.session_state.loaded = True
 
-if "selected_id" not in st.session_state:
-    st.session_state.selected_id = None
+# ── helpers ───────────────────────────────────────────────────
+CLUSTER_COLORS = [
+    "#c8f07a","#7eb8f7","#b49ffa","#f5c97a",
+    "#ff9f7a","#5dc4a5","#ff6b6b","#e8a0bf",
+    "#a0e8d5","#f7d07e","#d0a0f7","#a0c8f7",
+]
 
-# ── Board save via query param ────────────────────────────────
-_qs = st.query_params
-if "_bs" in _qs:
+def paper_id(title):
+    return hashlib.md5(title.lower().strip().encode()).hexdigest()[:12]
+
+def fetch_from_crossref(query):
+    """Fetch paper metadata from CrossRef API (free, no key needed)"""
+    if not REQUESTS_OK:
+        return []
     try:
-        _new_bs = json.loads(_qs["_bs"])
-        st.session_state.board_state = _new_bs
-        save_data()
+        url = f"https://api.crossref.org/works?query={requests.utils.quote(query)}&rows=10&select=title,author,published,abstract,DOI,container-title"
+        r = requests.get(url, timeout=10, headers={"User-Agent": "PaperCluster/1.0 (research tool)"})
+        if r.status_code != 200:
+            return []
+        items = r.json().get("message", {}).get("items", [])
+        results = []
+        for item in items:
+            title_list = item.get("title", [])
+            if not title_list:
+                continue
+            title = title_list[0]
+            authors = ""
+            if item.get("author"):
+                auth_list = [a.get("family", "") for a in item["author"][:3]]
+                authors = ", ".join(a for a in auth_list if a)
+                if len(item["author"]) > 3:
+                    authors += " et al."
+            year = ""
+            pub = item.get("published", {})
+            if pub.get("date-parts"):
+                year = str(pub["date-parts"][0][0])
+            journal = ""
+            ct = item.get("container-title", [])
+            if ct:
+                journal = ct[0]
+            abstract = item.get("abstract", "")
+            # strip HTML tags from abstract
+            abstract = re.sub(r'<[^>]+>', '', abstract)
+            doi = item.get("DOI", "")
+            results.append({
+                "id": paper_id(title),
+                "title": title,
+                "authors": authors,
+                "year": year,
+                "journal": journal,
+                "abstract": abstract[:2000],
+                "doi": doi,
+                "source": "crossref",
+            })
+        return results
     except Exception:
-        pass
-    st.query_params.clear()
+        return []
 
-# ── Analysis helpers ──────────────────────────────────────────
-def extract_pdf_text(file_bytes):
-    if not PDF_SUPPORT:
-        return ""
-    reader = pypdf.PdfReader(io.BytesIO(file_bytes))
-    text = ""
-    for page in reader.pages[:25]:
-        text += page.extract_text() or ""
-    return text.strip()
+def fetch_from_semantic_scholar(query):
+    """Fetch from Semantic Scholar API (free, no key needed)"""
+    if not REQUESTS_OK:
+        return []
+    try:
+        url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={requests.utils.quote(query)}&limit=10&fields=title,authors,year,abstract,venue,externalIds"
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            return []
+        items = r.json().get("data", [])
+        results = []
+        for item in items:
+            title = item.get("title", "")
+            if not title:
+                continue
+            authors_raw = item.get("authors", [])
+            authors = ", ".join(a.get("name","") for a in authors_raw[:3])
+            if len(authors_raw) > 3:
+                authors += " et al."
+            year = str(item.get("year", "")) if item.get("year") else ""
+            journal = item.get("venue", "")
+            abstract = item.get("abstract", "") or ""
+            doi = item.get("externalIds", {}).get("DOI", "")
+            results.append({
+                "id": paper_id(title),
+                "title": title,
+                "authors": authors,
+                "year": year,
+                "journal": journal,
+                "abstract": abstract[:2000],
+                "doi": doi,
+                "source": "semantic_scholar",
+            })
+        return results
+    except Exception:
+        return []
 
-def extract_abstract(text):
-    tl = text.lower()
-    for marker in ["abstract", "summary", "introduction"]:
-        idx = tl.find(marker)
-        if idx != -1:
-            return text[idx:idx+1500].strip()
-    return text[:1000]
+def fetch_by_doi(doi):
+    """Fetch single paper by DOI from CrossRef"""
+    if not REQUESTS_OK:
+        return None
+    try:
+        doi = doi.strip().replace("https://doi.org/","").replace("http://doi.org/","")
+        url = f"https://api.crossref.org/works/{requests.utils.quote(doi)}"
+        r = requests.get(url, timeout=10, headers={"User-Agent": "PaperCluster/1.0"})
+        if r.status_code != 200:
+            return None
+        item = r.json().get("message", {})
+        title_list = item.get("title", [])
+        if not title_list:
+            return None
+        title = title_list[0]
+        authors = ""
+        if item.get("author"):
+            auth_list = [a.get("family","") for a in item["author"][:3]]
+            authors = ", ".join(a for a in auth_list if a)
+            if len(item["author"]) > 3:
+                authors += " et al."
+        year = ""
+        pub = item.get("published", {})
+        if pub.get("date-parts"):
+            year = str(pub["date-parts"][0][0])
+        journal = ""
+        ct = item.get("container-title", [])
+        if ct:
+            journal = ct[0]
+        abstract = re.sub(r'<[^>]+>', '', item.get("abstract", ""))
+        return {
+            "id": paper_id(title),
+            "title": title,
+            "authors": authors,
+            "year": year,
+            "journal": journal,
+            "abstract": abstract[:2000],
+            "doi": doi,
+            "source": "doi_lookup",
+        }
+    except Exception:
+        return None
 
-def extract_title_from_text(text, filename):
-    lines = [l.strip() for l in text.split('\n') if len(l.strip()) > 20]
-    return lines[0][:120] if lines else filename.replace(".pdf", "")
-
-def extract_structured_themes(text):
-    tl = text.lower()
-    geo_keywords = {
-        "united states": "USA", "u.s.": "USA", "american": "USA",
-        "china": "China", "chinese": "China",
-        "european union": "EU", "europe": "Europe", "european": "Europe",
-        "united kingdom": "UK", "britain": "UK", "british": "UK",
-        "germany": "Germany", "france": "France", "italy": "Italy",
-        "japan": "Japan", "india": "India", "russia": "Russia",
-        "brazil": "Brazil", "latin america": "Latin America",
-        "africa": "Africa", "middle east": "Middle East",
-        "asia": "Asia", "developing countries": "Developing Countries",
-        "emerging markets": "Emerging Markets", "oecd": "OECD countries",
-        "brics": "BRICS", "global": "Global", "international": "International",
-        "cross-country": "Cross-country", "multinational": "Multinational",
-    }
-    geo_found = list(dict.fromkeys([v for k, v in geo_keywords.items() if k in tl]))[:4]
-
-    period_found = []
-    ranges = re.findall(r'((?:19|20)\d{2})\s*[-\u2013]\s*((?:19|20)\d{2})', text)
-    for start, end in ranges[:3]:
-        period_found.append(f"{start}\u2013{end}")
-    if not period_found:
-        decades = re.findall(r'((?:19|20)\d{2}s)', tl)
-        period_found = list(dict.fromkeys(decades))[:3]
-    period_kw = {
-        "longitudinal": "Longitudinal", "panel data": "Panel data",
-        "time series": "Time series", "cross-sectional": "Cross-sectional",
-        "annual": "Annual data", "monthly": "Monthly data",
-        "quarterly": "Quarterly data", "covid": "COVID-19 period",
-        "financial crisis": "Financial crisis period",
-    }
-    for k, v in period_kw.items():
-        if k in tl and v not in period_found:
-            period_found.append(v)
-    period_found = period_found[:4]
-
-    technique_keywords = {
-        "regression": "Regression", "ols": "OLS", "fixed effects": "Fixed effects",
-        "random effects": "Random effects", "instrumental variable": "IV / 2SLS",
-        "difference-in-difference": "Diff-in-diff", "did ": "Diff-in-diff",
-        "propensity score": "Propensity score matching",
-        "regression discontinuity": "Regression discontinuity",
-        "synthetic control": "Synthetic control", "var model": "VAR model",
-        "granger": "Granger causality", "cointegration": "Cointegration",
-        "meta-analysis": "Meta-analysis", "systematic review": "Systematic review",
-        "machine learning": "Machine learning", "deep learning": "Deep learning",
-        "neural network": "Neural network", "random forest": "Random forest",
-        "logistic regression": "Logistic regression", "probit": "Probit model",
-        "event study": "Event study", "bayesian": "Bayesian analysis",
-        "gmm": "GMM", "survey": "Survey analysis", "case study": "Case study",
-    }
-    tech_found = list(dict.fromkeys([v for k, v in technique_keywords.items() if k in tl]))[:5]
-
-    dataset_keywords = {
-        "world bank": "World Bank data", "imf": "IMF data",
-        "compustat": "Compustat", "crsp": "CRSP", "bloomberg": "Bloomberg",
-        "eurostat": "Eurostat", "census": "Census data",
-        "firm-level": "Firm-level data", "country-level": "Country-level data",
-        "twitter": "Twitter/X data", "patent": "Patent data",
-        "annual report": "Annual reports", "proprietary": "Proprietary dataset",
-        "hand-collected": "Hand-collected data",
-    }
-    data_found = list(dict.fromkeys([v for k, v in dataset_keywords.items() if k in tl]))[:4]
-
-    variable_keywords = {
-        "gdp": "GDP", "economic growth": "Economic growth",
-        "inflation": "Inflation", "unemployment": "Unemployment",
-        "interest rate": "Interest rate", "exchange rate": "Exchange rate",
-        "stock return": "Stock returns", "firm performance": "Firm performance",
-        "profitability": "Profitability", "leverage": "Leverage",
-        "investment": "Investment", "innovation": "Innovation",
-        "productivity": "Productivity", "foreign direct investment": "FDI",
-        "fdi": "FDI", "esg": "ESG scores", "sustainability": "Sustainability",
-        "corporate governance": "Corporate governance",
-        "ownership": "Ownership structure", "dividend": "Dividends",
-        "liquidity": "Liquidity", "volatility": "Volatility",
-        "income inequality": "Income inequality", "poverty": "Poverty",
-        "co2": "CO2 emissions", "carbon": "Carbon emissions",
-    }
-    var_found = list(dict.fromkeys([v for k, v in variable_keywords.items() if k in tl]))[:5]
-
-    return {
-        "geopolitical": geo_found, "period": period_found,
-        "techniques": tech_found, "datasets": data_found, "variables": var_found,
-    }
-
-def auto_extract_keywords(text):
-    s = extract_structured_themes(text)
-    flat = s["techniques"] + s["variables"] + s["geopolitical"]
-    return flat[:6] if flat else ["research", "analysis"]
-
-def simple_summarize(text, title):
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    sentences = [s.strip() for s in sentences if 40 < len(s.strip()) < 300]
-    keywords = ["propose", "present", "show", "demonstrate", "find", "result",
-                "achieve", "improve", "introduce", "novel", "contribute", "significant"]
-    scored = sorted([(sum(1 for k in keywords if k in s.lower()), s) for s in sentences[:50]], reverse=True)
-    top = [s for _, s in scored[:3]]
-    return " ".join(top) if top else (sentences[0] if sentences else f"Paper: {title}")
-
-def simple_findings(text):
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    markers = ["we show", "we find", "we demonstrate", "we propose", "we present",
-               "results show", "results indicate", "our method", "achieves",
-               "outperforms", "improves", "significantly", "we conclude", "this paper"]
-    findings = [s.strip() for s in sentences if 40 < len(s.strip()) < 250 and any(m in s.lower() for m in markers)]
-    return findings[:4] if findings else ["See abstract for key contributions."]
-
-def simple_gaps(text):
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    markers = ["limitation", "future work", "future research", "however",
-               "drawback", "challenge", "remain", "not address", "beyond the scope",
-               "one limitation", "further research"]
-    gaps = [s.strip() for s in sentences if 30 < len(s.strip()) < 250 and any(m in s.lower() for m in markers)]
-    return gaps[:2] if gaps else ["Limitations not explicitly stated in available text."]
-
-def analyze_locally(title, text):
-    return {
-        "summary": simple_summarize(text, title),
-        "findings": simple_findings(text),
-        "themes": auto_extract_keywords(text),
-        "gaps": simple_gaps(text),
-    }
-
-def tag_html(paper_type):
-    return f'<span class="tag tag-{paper_type}">{paper_type}</span>'
-
-def get_all_gaps():
-    return [{"gap": g, "paper": p["title"]} for p in st.session_state.papers for g in p.get("gaps", [])]
-
-# ── SIDEBAR ───────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("## ◎ LitLens")
-    st.markdown('<div style="font-size:11px; color:#c8f07a; font-family:DM Mono,monospace; margin-bottom:2px;">no API key needed</div>', unsafe_allow_html=True)
-    data_exists = os.path.exists(DATA_FILE)
-    st.markdown(f'<div style="font-size:10px; color:#888885; font-family:DM Mono,monospace; margin-bottom:8px;">💾 {"data saved" if data_exists else "no saved data yet"}</div>', unsafe_allow_html=True)
-    st.markdown("---")
-    st.markdown("**Navigation**")
-    page = st.radio("page", ["📚 Library", "🗂 Board", "📄 Add Paper", "📎 Upload PDF", "🔗 Synthesis", "📝 Notes"], label_visibility="collapsed")
-    st.markdown("---")
+def run_clustering(n_clusters=None):
+    """Cluster papers using TF-IDF + KMeans on title + abstract"""
     papers = st.session_state.papers
-    if papers:
-        st.markdown(f"**{len(papers)} paper{'s' if len(papers)!=1 else ''}**")
-        search = st.text_input("Search", placeholder="Filter...", label_visibility="collapsed")
-        filtered = [p for p in papers if search.lower() in p["title"].lower() or search.lower() in p.get("authors","").lower()] if search else papers
-        for p in filtered:
-            label = f"{'📄 ' if p.get('source')=='pdf' else ''}{p['title'][:42]}{'...' if len(p['title'])>42 else ''}"
-            if st.button(label, key=f"sel_{p['id']}", use_container_width=True):
-                st.session_state.selected_id = p["id"]
-                save_data()
-                st.rerun()
-    else:
-        st.markdown('<div style="font-size:12px; color:#888885; line-height:1.7;">No papers yet.<br>Add one to get started.</div>', unsafe_allow_html=True)
+    if len(papers) < 3:
+        return False, "Need at least 3 papers to cluster."
+    if not SKLEARN_OK:
+        return False, "scikit-learn not installed."
 
-# ── PAGE: LIBRARY ─────────────────────────────────────────────
-if page == "📚 Library":
-    selected = next((p for p in st.session_state.papers if p["id"] == st.session_state.selected_id), None)
+    # Build corpus
+    corpus = []
+    for p in papers:
+        text = p.get("title","") + " " + p.get("abstract","") + " " + p.get("journal","")
+        corpus.append(text.strip())
 
-    if not selected:
-        st.markdown('<div class="page-title">Library</div>', unsafe_allow_html=True)
-        st.markdown('<div style="color:#888885;font-size:14px;margin-bottom:2rem;">Select a paper from the sidebar, or add one to get started.</div>', unsafe_allow_html=True)
-        if st.session_state.papers:
-            cols = st.columns(2)
-            for i, p in enumerate(st.session_state.papers):
-                with cols[i % 2]:
-                    st.markdown(f'<div class="paper-card"><h4>{p["title"]}</h4><div class="meta">{p.get("authors","—")} {("· "+p["year"]) if p.get("year") else ""}</div><div style="margin-top:8px">{tag_html(p.get("type","empirical"))}{"<span class=tag tag-pdf>PDF</span>" if p.get("source")=="pdf" else ""}</div></div>', unsafe_allow_html=True)
-        else:
-            st.info("No papers yet. Use **Add Paper** or **Upload PDF** to begin.")
-    else:
-        p = selected
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.markdown(f'<div class="page-title">{p["title"]}</div>', unsafe_allow_html=True)
-        with col2:
-            if st.button("🗑 Remove", type="secondary"):
-                st.session_state.papers = [x for x in st.session_state.papers if x["id"] != p["id"]]
-                st.session_state.selected_id = None
-                save_data()
-                st.rerun()
+    # TF-IDF
+    vectorizer = TfidfVectorizer(
+        max_features=500,
+        stop_words="english",
+        ngram_range=(1, 2),
+        min_df=1,
+    )
+    X = vectorizer.fit_transform(corpus)
 
-        meta_parts = [x for x in [p.get("authors"), p.get("year"), p.get("journal")] if x]
-        st.markdown(f'<div style="color:#888885;font-size:13px;font-family:DM Mono,monospace;margin-bottom:1rem;">{" · ".join(meta_parts)}</div>', unsafe_allow_html=True)
-        st.markdown(tag_html(p.get("type","empirical")) + ('&nbsp;<span class="tag tag-pdf">PDF</span>' if p.get("source")=="pdf" else ""), unsafe_allow_html=True)
+    # Auto-select n_clusters if not specified
+    if n_clusters is None:
+        best_k = 2
+        best_score = -1
+        max_k = min(8, len(papers) - 1)
+        if max_k < 2:
+            max_k = 2
+        for k in range(2, max_k + 1):
+            try:
+                km = KMeans(n_clusters=k, random_state=42, n_init=10)
+                labels = km.fit_predict(X)
+                if len(set(labels)) < 2:
+                    continue
+                score = silhouette_score(X, labels)
+                if score > best_score:
+                    best_score = score
+                    best_k = k
+            except Exception:
+                pass
+        n_clusters = best_k
 
-        st.markdown('<div class="section-title">Summary</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="summary-block">{p.get("summary","No summary yet.")}</div>', unsafe_allow_html=True)
+    # Final clustering
+    km = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    labels = km.fit_predict(X)
 
-        if p.get("findings"):
-            st.markdown('<div class="section-title">Key Findings</div>', unsafe_allow_html=True)
-            cols = st.columns(2)
-            for i, f in enumerate(p["findings"]):
-                with cols[i % 2]:
-                    st.markdown(f'<div class="finding"><div class="finding-label">finding {i+1}</div>{f}</div>', unsafe_allow_html=True)
+    # PCA for 2D visualization
+    pca = PCA(n_components=2, random_state=42)
+    coords = pca.fit_transform(X.toarray())
 
-        if p.get("themes"):
-            st.markdown('<div class="section-title">Themes</div>', unsafe_allow_html=True)
-            st.markdown("".join([f'<span class="theme-chip">{t}</span>' for t in p["themes"]]), unsafe_allow_html=True)
+    # Extract top keywords per cluster
+    feature_names = vectorizer.get_feature_names_out()
+    cluster_keywords = {}
+    order_centroids = km.cluster_centers_.argsort()[:, ::-1]
+    for i in range(n_clusters):
+        top = [feature_names[ind] for ind in order_centroids[i, :6]]
+        cluster_keywords[str(i)] = top
 
-        if p.get("gaps"):
-            st.markdown('<div class="section-title">Research Gaps</div>', unsafe_allow_html=True)
-            for g in p["gaps"]:
-                st.markdown(f'<div class="gap-item">{g}</div>', unsafe_allow_html=True)
-
-        st.markdown('<div class="section-title">Actions</div>', unsafe_allow_html=True)
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🔄 Re-analyze", use_container_width=True):
-                with st.spinner("Analyzing..."):
-                    text = p.get("abstract","") + " " + p.get("full_text","")
-                    result = analyze_locally(p["title"], text)
-                    p.update(result)
-                    save_data()
-                st.rerun()
-        with col2:
-            if st.button("✏️ Edit Metadata", use_container_width=True):
-                st.session_state[f"editing_{p['id']}"] = True
-
-        if st.session_state.get(f"editing_{p['id']}"):
-            with st.form(f"edit_{p['id']}"):
-                new_title   = st.text_input("Title", value=p["title"])
-                new_authors = st.text_input("Authors", value=p.get("authors",""))
-                new_year    = st.text_input("Year", value=p.get("year",""))
-                new_journal = st.text_input("Journal", value=p.get("journal",""))
-                new_type    = st.selectbox("Type", ["empirical","methods","review","theory"],
-                                           index=["empirical","methods","review","theory"].index(p.get("type","empirical")))
-                if st.form_submit_button("Save"):
-                    p.update({"title": new_title, "authors": new_authors,
-                              "year": new_year, "journal": new_journal, "type": new_type})
-                    save_data()
-                    del st.session_state[f"editing_{p['id']}"]
-                    st.rerun()
-
-        if p.get("abstract"):
-            with st.expander("Abstract / Full Text"):
-                st.markdown(f'<div style="font-size:13px;color:#888885;line-height:1.8;">{p["abstract"][:3000]}</div>', unsafe_allow_html=True)
-
-
-# ── PAGE: BOARD ───────────────────────────────────────────────
-elif page == "🗂 Board":
-    import streamlit.components.v1 as components
-    import json as _json
-
-    papers = st.session_state.papers
-
-    if "board_state" not in st.session_state or not st.session_state.board_state:
-        raw = load_data()
-        st.session_state.board_state = raw.get("board_state", {
-            "subjects": [], "arrows": [], "pool_pos": {"x": 20, "y": 60}
+    # Build cluster assignment
+    clusters = {}
+    for idx, (paper, label, coord) in enumerate(zip(papers, labels, coords)):
+        cid = str(label)
+        if cid not in clusters:
+            clusters[cid] = []
+        clusters[cid].append({
+            "id": paper["id"],
+            "x": float(coord[0]),
+            "y": float(coord[1]),
         })
+        # Store coords on paper
+        st.session_state.papers[idx]["cluster"] = cid
+        st.session_state.papers[idx]["x"] = float(coord[0])
+        st.session_state.papers[idx]["y"] = float(coord[1])
 
-    papers_js = _json.dumps([{
-        "id": p["id"], "title": p["title"],
-        "authors": p.get("authors", ""), "year": p.get("year", ""),
-        "type": p.get("type", "empirical"), "source": p.get("source", "manual"),
-    } for p in papers])
-    state_js = _json.dumps(st.session_state.board_state)
+    st.session_state.clusters = clusters
+    st.session_state.cluster_keywords = cluster_keywords
 
-    BOARD_HTML = r"""<!DOCTYPE html>
+    # Auto-generate cluster labels from keywords
+    existing_labels = st.session_state.cluster_labels
+    for cid, kws in cluster_keywords.items():
+        if cid not in existing_labels:
+            existing_labels[cid] = " · ".join(kws[:3])
+    st.session_state.cluster_labels = existing_labels
+
+    save_data()
+    return True, f"Clustered into {n_clusters} groups."
+
+# ── sidebar ───────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("## ◎ PaperCluster")
+    st.markdown('<div style="font-size:11px;color:#c8f07a;font-family:DM Mono,monospace;margin-bottom:4px;">auto-clustering · no API key</div>', unsafe_allow_html=True)
+    n = len(st.session_state.papers)
+    st.markdown(f'<div style="font-size:10px;color:#888885;font-family:DM Mono,monospace;margin-bottom:8px;">{n} paper{"s" if n!=1 else ""} in library</div>', unsafe_allow_html=True)
+    st.markdown("---")
+    page = st.radio("page", ["🗺 Cluster Map", "🔍 Search & Add", "📄 Manual Add", "📚 Library", "⚙️ Settings"], label_visibility="collapsed")
+    st.markdown("---")
+    if n >= 3:
+        if st.button("🔄 Re-cluster", use_container_width=True, type="primary"):
+            ok, msg = run_clustering()
+            if ok:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+    if n > 0:
+        if st.button("🗑 Clear All", use_container_width=True):
+            if st.session_state.get("confirm_clear"):
+                st.session_state.papers = []
+                st.session_state.clusters = {}
+                st.session_state.cluster_labels = {}
+                save_data()
+                st.session_state.confirm_clear = False
+                st.rerun()
+            else:
+                st.session_state.confirm_clear = True
+                st.warning("Click again to confirm")
+
+# ── PAGE: CLUSTER MAP ─────────────────────────────────────────
+if page == "🗺 Cluster Map":
+    st.markdown('<div class="page-title">Cluster Map</div>', unsafe_allow_html=True)
+
+    papers = st.session_state.papers
+    clusters = st.session_state.clusters
+    cluster_labels = st.session_state.cluster_labels
+    cluster_keywords = st.session_state.get("cluster_keywords", {})
+
+    if len(papers) < 3:
+        st.info(f"Add at least 3 papers to generate a cluster map. You have {len(papers)} so far.")
+        st.markdown('<div style="color:#888885;font-size:13px;">Use **Search & Add** to find papers from CrossRef or Semantic Scholar, or **Manual Add** to enter them directly.</div>', unsafe_allow_html=True)
+    elif not clusters:
+        st.info("Papers added! Click **Re-cluster** in the sidebar to generate your cluster map.")
+    else:
+        # Stats row
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown(f'<div class="stat-box"><div class="stat-num">{len(papers)}</div><div class="stat-label">Papers</div></div>', unsafe_allow_html=True)
+        with c2:
+            st.markdown(f'<div class="stat-box"><div class="stat-num">{len(clusters)}</div><div class="stat-label">Clusters</div></div>', unsafe_allow_html=True)
+        with c3:
+            covered = sum(1 for p in papers if p.get("abstract","").strip())
+            st.markdown(f'<div class="stat-box"><div class="stat-num">{covered}</div><div class="stat-label">With Abstract</div></div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="section-title">Interactive Map</div>', unsafe_allow_html=True)
+
+        # Build data for visualization
+        plot_data = []
+        for p in papers:
+            if "x" in p and "y" in p:
+                cid = str(p.get("cluster", "0"))
+                color = CLUSTER_COLORS[int(cid) % len(CLUSTER_COLORS)]
+                label = cluster_labels.get(cid, f"Cluster {cid}")
+                plot_data.append({
+                    "id": p["id"],
+                    "title": p["title"],
+                    "authors": p.get("authors",""),
+                    "year": p.get("year",""),
+                    "journal": p.get("journal",""),
+                    "x": p["x"],
+                    "y": p["y"],
+                    "cluster": cid,
+                    "color": color,
+                    "label": label,
+                })
+
+        import streamlit.components.v1 as components
+        plot_js = json.dumps(plot_data)
+        colors_js = json.dumps({str(i): CLUSTER_COLORS[i % len(CLUSTER_COLORS)] for i in range(len(clusters))})
+        labels_js = json.dumps(cluster_labels)
+
+        MAP_HTML = r"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
-*{box-sizing:border-box;margin:0;padding:0;font-family:Inter,sans-serif;-webkit-user-select:none;user-select:none}
+*{box-sizing:border-box;margin:0;padding:0;font-family:Inter,sans-serif}
 body{background:#0e0e10;overflow:hidden}
-#wrap{position:fixed;top:0;left:0;right:0;bottom:0;overflow:hidden;cursor:default}
-#cv{position:absolute;top:0;left:0;width:5000px;height:4000px;transform-origin:0 0}
-#sv{position:absolute;top:0;left:0;width:5000px;height:4000px;pointer-events:none;z-index:1}
-#sv.am{pointer-events:all;cursor:crosshair}
-
-/* nodes */
-.node{position:absolute;background:#18181c;border:2px solid rgba(255,255,255,.1);border-radius:14px;min-width:230px;max-width:270px;z-index:10;box-shadow:0 6px 28px rgba(0,0,0,.6)}
-.node.am-hi{border-color:#c8f07a !important;background:#1e1e24}
-.node-head{padding:9px 12px 7px;cursor:move;display:flex;align-items:center;gap:7px;border-radius:12px 12px 0 0}
-.ndot{width:10px;height:10px;border-radius:50%;flex-shrink:0;pointer-events:none}
-.ntitle{font-size:13px;font-weight:600;color:#f0ede8;flex:1;outline:none;border:none;background:none;cursor:text;min-width:0}
-.ntitle:focus{background:rgba(255,255,255,.06);border-radius:4px;padding:2px 5px}
-.nbtns{display:flex;gap:3px;opacity:0;transition:opacity .15s;flex-shrink:0}
-.node:hover>.node-head .nbtns{opacity:1}
-.nbtns button{background:none;border:none;color:#777;cursor:pointer;font-size:12px;padding:2px 5px;border-radius:4px}
-.nbtns button:hover{background:rgba(255,255,255,.08);color:#f0ede8}
-.nbody{padding:0 8px 8px}
-
-/* subfields — recursive, each level indents */
-.sf{background:#0e0e10;border:1px solid rgba(255,255,255,.06);border-radius:9px;margin-bottom:5px}
-.sf.dz-over{border-color:#c8f07a !important;background:#141418}
-.sfh{padding:5px 8px;display:flex;align-items:center;gap:5px;cursor:pointer;border-radius:9px 9px 0 0}
-.sfdot{width:7px;height:7px;border-radius:50%;flex-shrink:0;pointer-events:none}
-.sfname{font-size:11px;font-weight:500;color:#ccc8c0;flex:1;outline:none;border:none;background:none;cursor:text;min-width:0}
-.sfname:focus{background:rgba(255,255,255,.05);border-radius:3px;padding:1px 4px}
-.sftog{font-size:10px;color:#555;padding:0 2px;flex-shrink:0}
-.sfbtns{display:flex;gap:2px;opacity:0;transition:opacity .15s;flex-shrink:0}
-.sf:hover>.sfh .sfbtns{opacity:1}
-.sfbtns button,.sfbtn{background:none;border:none;color:#666;cursor:pointer;font-size:11px;padding:1px 4px;border-radius:3px}
-.sfbtns button:hover,.sfbtn:hover{background:rgba(255,255,255,.08);color:#f0ede8}
-.sfbody{padding:0 6px 6px;display:flex;flex-direction:column;gap:4px}
-.sfbody.closed{display:none}
-
-/* nested subfield children get a left border indent */
-.sfbody>.sf{border-left:2px solid rgba(255,255,255,.06);margin-left:4px}
-
-/* drop zone */
-.dz{border:1.5px dashed rgba(255,255,255,.08);border-radius:7px;padding:5px;font-size:10px;color:#444;text-align:center;font-family:DM Mono,monospace;min-height:26px;display:flex;align-items:center;justify-content:center;transition:border-color .15s,background .15s,color .15s}
-.dz.over{border-color:#c8f07a;background:rgba(200,240,122,.06);color:#c8f07a}
-
-/* paper card */
-.pc{background:#18181c;border:1px solid rgba(255,255,255,.08);border-radius:7px;padding:6px 8px;cursor:grab;line-height:1.4;position:relative;transition:border-color .12s,opacity .15s,transform .1s}
-.pc:hover{border-color:rgba(255,255,255,.22);transform:translateY(-1px)}
-.pc.dragging{opacity:.3;cursor:grabbing}
-.pc .pt{font-size:11px;font-weight:500;color:#f0ede8;margin-bottom:1px;padding-right:14px}
-.pc .pm{font-size:10px;color:#555;font-family:DM Mono,monospace}
-.pc .prm{position:absolute;top:4px;right:4px;background:none;border:none;color:#555;cursor:pointer;font-size:10px;padding:1px 3px;border-radius:3px;opacity:0;transition:opacity .15s;line-height:1}
-.pc:hover .prm{opacity:1}
-
-/* pool */
-#pool{position:absolute;z-index:15;background:#111215;border:1px solid rgba(255,255,255,.08);border-radius:13px;padding:10px;min-width:210px;max-width:240px}
-#ph{font-size:11px;font-weight:600;color:#888885;font-family:DM Mono,monospace;text-transform:uppercase;letter-spacing:.07em;margin-bottom:7px;cursor:move;display:flex;align-items:center;gap:6px}
-#pcnt{font-size:10px;color:#f5c97a;font-family:DM Mono,monospace;margin-left:auto}
-#pcards{display:flex;flex-direction:column;gap:4px;max-height:400px;overflow-y:auto}
-#pcards::-webkit-scrollbar{width:4px}
-#pcards::-webkit-scrollbar-thumb{background:#333;border-radius:2px}
-
-/* add buttons */
-.addsf,.addssf{background:none;border:1.5px dashed rgba(255,255,255,.08);border-radius:6px;color:#555;font-size:10px;cursor:pointer;padding:4px;margin-top:3px;width:100%}
-.addsf:hover,.addssf:hover{border-color:rgba(255,255,255,.25);color:#f0ede8}
-
-/* ctrl bar */
-#ctrlbar{position:absolute;top:12px;left:12px;z-index:50;display:flex;gap:6px;align-items:center}
-#ctrlbar button{background:#18181c;color:#f0ede8;border:1px solid rgba(255,255,255,.15);border-radius:7px;padding:5px 11px;font-size:12px;cursor:pointer}
-#ctrlbar button:hover{background:#222}
-#ctrlbar button.on{background:#c8f07a;color:#0e0e10;border-color:#c8f07a}
-
-/* arrows */
-.arr{stroke:rgba(255,255,255,.2);stroke-width:1.5;fill:none;marker-end:url(#ah);cursor:pointer;pointer-events:stroke}
-.arr:hover{stroke:#7eb8f7}
-.arr.sel{stroke:#c8f07a;stroke-width:2.5;marker-end:url(#ahs)}
-
-/* toast */
-#toast{position:fixed;bottom:14px;right:14px;background:#18181c;color:#c8f07a;border:1px solid rgba(200,240,122,.3);border-radius:8px;padding:7px 14px;font-size:12px;font-family:DM Mono,monospace;display:none;z-index:400}
-#toast.on{display:block}
+#wrap{position:fixed;top:0;left:0;right:0;bottom:0;overflow:hidden}
+canvas{position:absolute;top:0;left:0}
+#tooltip{position:fixed;background:#1e1e24;border:1px solid rgba(255,255,255,.15);border-radius:10px;padding:10px 14px;font-size:12px;color:#f0ede8;pointer-events:none;display:none;max-width:260px;z-index:100;line-height:1.6}
+#tooltip .tt{font-weight:600;color:#f0ede8;margin-bottom:3px;font-size:13px}
+#tooltip .tm{font-size:11px;color:#888885;font-family:DM Mono,monospace}
+#tooltip .tc{font-size:10px;margin-top:4px;padding:2px 8px;border-radius:100px;display:inline-block}
+#legend{position:fixed;bottom:14px;left:14px;background:#18181c;border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:10px 14px;z-index:50}
+#legend .li{display:flex;align-items:center;gap:8px;margin-bottom:5px;font-size:11px;color:#ccc8c0;cursor:pointer}
+#legend .li:last-child{margin-bottom:0}
+#legend .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+#hint{position:fixed;bottom:14px;right:14px;font-size:10px;color:#444;font-family:DM Mono,monospace}
 </style></head>
 <body>
-<div id="wrap">
-  <div id="cv">
-    <svg id="sv"><defs>
-      <marker id="ah" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="rgba(255,255,255,.3)"/></marker>
-      <marker id="ahs" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#c8f07a"/></marker>
-    </defs></svg>
-    <div id="ctrlbar">
-      <button onclick="addSubject()">+ Subject</button>
-      <button id="bam" onclick="toggleAM()">Connect</button>
-      <button id="bda" style="display:none" onclick="delArrow()">Del Arrow</button>
-      <button onclick="resetView()">Fit</button>
-    </div>
-    <div id="pool">
-      <div id="ph">Unassigned <span id="pcnt"></span></div>
-      <div id="pcards"></div>
-    </div>
-  </div>
-</div>
-<div id="toast">Saved!</div>
-
+<div id="wrap"><canvas id="c"></canvas></div>
+<div id="tooltip"><div class="tt" id="tt"></div><div class="tm" id="tm"></div><div class="tc" id="tc"></div></div>
+<div id="legend" id="leg"></div>
+<div id="hint">scroll=zoom · drag=pan</div>
 <script>
-var PAPERS = PAPERS_PH;
-var ST = STATE_PH;
-if(!ST.subjects) ST.subjects=[];
-if(!ST.arrows)   ST.arrows=[];
-if(!ST.pool_pos) ST.pool_pos={x:20,y:56};
+var DATA   = DATA_PH;
+var COLORS = COLORS_PH;
+var LABELS = LABELS_PH;
 
-// Restore from sessionStorage if newer
-(function(){
-  try{
-    var ss=sessionStorage.getItem('litlens_board');
-    if(ss){ var p=JSON.parse(ss); if(p&&p._ts&&(!ST._ts||p._ts>ST._ts)){ST=p;if(!ST.subjects)ST.subjects=[];if(!ST.arrows)ST.arrows=[];if(!ST.pool_pos)ST.pool_pos={x:20,y:56};} }
-  }catch(e){}
-})();
+var canvas = document.getElementById('c');
+var ctx    = canvas.getContext('2d');
+var W, H;
 
-var PM={};
-PAPERS.forEach(function(p){PM[p.id]=p;});
-var COLS=["#c8f07a","#7eb8f7","#b49ffa","#f5c97a","#ff9f7a","#5dc4a5","#ff6b6b","#e8a0bf"];
-var ci=0;
-function nc(){return COLS[(ci++)%COLS.length];}
-function uid(){return 'x'+Math.random().toString(36).substr(2,9);}
-function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function resize(){
+  W = canvas.width  = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  draw();
+}
+window.addEventListener('resize', resize);
 
-// ── pan/zoom ──
-var px=0,py=0,sc=1,panning=false,psx=0,psy=0;
-var CV=document.getElementById('cv'),WR=document.getElementById('wrap');
-function applyT(){CV.style.transform='translate('+px+'px,'+py+'px) scale('+sc+')';}
-function resetView(){px=0;py=0;sc=1;applyT();}
-WR.addEventListener('wheel',function(e){e.preventDefault();sc=Math.min(2.5,Math.max(0.2,sc*(e.deltaY>0?0.9:1.1)));applyT();},{passive:false});
-WR.addEventListener('mousedown',function(e){if(e.target!==WR&&e.target!==CV&&e.target.id!=='sv')return;panning=true;psx=e.clientX-px;psy=e.clientY-py;WR.style.cursor='grabbing';});
-document.addEventListener('mousemove',function(e){if(!panning)return;px=e.clientX-psx;py=e.clientY-psy;applyT();});
-document.addEventListener('mouseup',function(){panning=false;WR.style.cursor='';});
+// pan/zoom
+var ox=0, oy=0, scale=1;
+var dragging=false, lx=0, ly=0;
 
-// ── drag state ──
-var dragPid=null,dragFrom=null; // dragFrom={path:[sfid,sfid,...]} path from root to containing sf
+canvas.addEventListener('wheel', function(e){
+  e.preventDefault();
+  var f = e.deltaY > 0 ? 0.9 : 1.1;
+  var mx = e.clientX, my = e.clientY;
+  ox = mx - (mx - ox) * f;
+  oy = my - (my - oy) * f;
+  scale *= f;
+  draw();
+},{passive:false});
 
-// ── save ──
-var saveTimer=null;
-function md(){clearTimeout(saveTimer);saveTimer=setTimeout(doSave,800);}
-function doSave(){
-  ST._ts=Date.now();
-  var json=JSON.stringify(ST);
-  try{sessionStorage.setItem('litlens_board',json);}catch(e){}
-  try{var base=window.parent.location.href.split('?')[0];window.parent.history.replaceState(null,'',base+'?_bs='+encodeURIComponent(json));}catch(e){}
-  var t=document.getElementById('toast');t.classList.add('on');
-  setTimeout(function(){t.classList.remove('on');},1200);
+canvas.addEventListener('mousedown', function(e){dragging=true;lx=e.clientX;ly=e.clientY;});
+window.addEventListener('mousemove', function(e){
+  if(dragging){ ox+=e.clientX-lx; oy+=e.clientY-ly; lx=e.clientX; ly=e.clientY; draw(); }
+  showTooltip(e.clientX, e.clientY);
+});
+window.addEventListener('mouseup', function(){dragging=false;});
+
+// world → screen
+function wx(x){ return ox + x * scale; }
+function wy(y){ return oy + y * scale; }
+
+// normalize data coords to canvas
+var minX, maxX, minY, maxY;
+function initBounds(){
+  if(!DATA.length){ minX=minY=-1; maxX=maxY=1; return; }
+  minX = Math.min.apply(null, DATA.map(function(d){return d.x;}));
+  maxX = Math.max.apply(null, DATA.map(function(d){return d.x;}));
+  minY = Math.min.apply(null, DATA.map(function(d){return d.y;}));
+  maxY = Math.max.apply(null, DATA.map(function(d){return d.y;}));
+}
+function initView(){
+  initBounds();
+  var pad = 80;
+  var rw = maxX - minX || 1;
+  var rh = maxY - minY || 1;
+  scale = Math.min((W-pad*2)/rw, (H-pad*2)/rh) * 0.85;
+  ox = W/2 - ((minX+maxX)/2) * scale;
+  oy = H/2 - ((minY+maxY)/2) * scale;
 }
 
-// ── render ──
-function render(){
-  document.querySelectorAll('.node').forEach(function(e){e.remove();});
-  ST.subjects.forEach(buildNode);
-  buildPool();
-  drawArrows();
-}
+function draw(){
+  ctx.clearRect(0,0,W,H);
 
-// ── collect all assigned paper ids recursively ──
-function collectAssigned(children){
-  var s={};
-  (children||[]).forEach(function(sf){
-    (sf.papers||[]).forEach(function(id){s[id]=1;});
-    Object.assign(s,collectAssigned(sf.children));
+  // draw cluster hulls (convex areas)
+  var clusterGroups = {};
+  DATA.forEach(function(d){
+    if(!clusterGroups[d.cluster]) clusterGroups[d.cluster]=[];
+    clusterGroups[d.cluster].push(d);
   });
-  return s;
-}
-function assignedSet(){
-  var s={};
-  ST.subjects.forEach(function(sub){Object.assign(s,collectAssigned(sub.subfields));});
-  return s;
-}
 
-// ── pool ──
-function buildPool(){
-  var pool=document.getElementById('pool');
-  pool.style.left=ST.pool_pos.x+'px';pool.style.top=ST.pool_pos.y+'px';
-  var as=assignedSet();
-  var ua=PAPERS.filter(function(p){return !as[p.id];});
-  document.getElementById('pcnt').textContent=ua.length?'('+ua.length+')':'(0)';
-  var cont=document.getElementById('pcards');cont.innerHTML='';
-  if(!ua.length){cont.innerHTML='<div style="font-size:10px;color:#444;font-family:DM Mono,monospace;text-align:center;padding:8px">all assigned</div>';}
-  else{ua.forEach(function(p){cont.appendChild(makeCard(p,null));});}
-  makeDraggable(document.getElementById('ph'),function(x,y){ST.pool_pos={x:x,y:y};pool.style.left=x+'px';pool.style.top=y+'px';},{nodeEl:pool});
-}
-
-// ── paper card ──
-// path = array of sfids from root to the sf containing this card (null = pool)
-function makeCard(p,path){
-  var d=document.createElement('div');d.className='pc';d.dataset.pid=p.id;
-  var meta=(p.authors?p.authors.substr(0,22):'')+(p.year?' '+p.year:'');
-  d.innerHTML='<div class="pt">'+esc(p.title.substr(0,50))+(p.title.length>50?'...':'')+'</div>'+(meta?'<div class="pm">'+esc(meta)+'</div>':'');
-  d.addEventListener('mousedown',function(e){e.stopPropagation();});
-  d.setAttribute('draggable','true');
-  d.addEventListener('dragstart',function(e){
-    dragPid=p.id; dragFrom=path?path.slice():null;
-    d.classList.add('dragging');
-    e.dataTransfer.effectAllowed='move';
-    e.dataTransfer.setData('text/plain',p.id);
-  });
-  d.addEventListener('dragend',function(){
-    d.classList.remove('dragging');dragPid=null;dragFrom=null;
-    document.querySelectorAll('.dz').forEach(function(z){z.classList.remove('over');});
-    document.querySelectorAll('.sf').forEach(function(s){s.classList.remove('dz-over');});
-  });
-  if(path){
-    var rb=document.createElement('button');rb.className='prm';rb.textContent='x';rb.title='Remove';
-    rb.addEventListener('mousedown',function(e){e.stopPropagation();e.preventDefault();});
-    rb.addEventListener('click',function(e){
-      e.stopPropagation();
-      var sf=findSF(path);
-      if(sf) sf.papers=(sf.papers||[]).filter(function(x){return x!==p.id;});
-      md();render();
+  Object.keys(clusterGroups).forEach(function(cid){
+    var pts = clusterGroups[cid];
+    var color = COLORS[cid] || '#888';
+    // draw soft circle around cluster center
+    var cx2 = pts.reduce(function(s,p){return s+p.x;},0)/pts.length;
+    var cy2 = pts.reduce(function(s,p){return s+p.y;},0)/pts.length;
+    var maxR = 0;
+    pts.forEach(function(p){
+      var d2 = Math.sqrt((p.x-cx2)*(p.x-cx2)+(p.y-cy2)*(p.y-cy2));
+      if(d2>maxR) maxR=d2;
     });
-    d.appendChild(rb);
-  }
-  return d;
-}
+    var r = (maxR * scale + 38);
+    var sx = wx(cx2), sy = wy(cy2);
+    var grad = ctx.createRadialGradient(sx,sy,0,sx,sy,r);
+    grad.addColorStop(0, color.replace(')',',0.10)').replace('rgb','rgba').replace('#','').length>8?color+'22':hexToRgba(color,0.10));
+    grad.addColorStop(1, hexToRgba(color,0));
+    ctx.beginPath();
+    ctx.arc(sx,sy,r,0,Math.PI*2);
+    ctx.fillStyle=grad;
+    ctx.fill();
+  });
 
-// ── find a subfield by path (array of sfids) ──
-function findSF(path){
-  if(!path||!path.length) return null;
-  // search across all subjects
-  var result=null;
-  function search(children){
-    (children||[]).forEach(function(sf){
-      if(sf.id===path[path.length-1]){
-        result=sf;
-      } else {
-        search(sf.children);
-      }
+  // draw points
+  DATA.forEach(function(d){
+    var sx=wx(d.x), sy=wy(d.y);
+    var r = Math.max(5, Math.min(10, scale*0.15));
+
+    ctx.beginPath();
+    ctx.arc(sx,sy,r+2,0,Math.PI*2);
+    ctx.fillStyle='rgba(0,0,0,0.4)';
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(sx,sy,r,0,Math.PI*2);
+    ctx.fillStyle=d.color;
+    ctx.fill();
+
+    // label
+    if(scale > 60){
+      ctx.font = '10px Inter';
+      ctx.fillStyle = 'rgba(240,237,232,0.7)';
+      ctx.fillText(d.title.substr(0,28)+(d.title.length>28?'...':''), sx+r+4, sy+4);
+    }
+  });
+
+  // draw cluster labels
+  Object.keys(clusterGroups).forEach(function(cid){
+    var pts = clusterGroups[cid];
+    var color = COLORS[cid] || '#888';
+    var cx2 = pts.reduce(function(s,p){return s+p.x;},0)/pts.length;
+    var cy2 = pts.reduce(function(s,p){return s+p.y;},0)/pts.length;
+    var maxR = 0;
+    pts.forEach(function(p){
+      var d2=Math.sqrt((p.x-cx2)*(p.x-cx2)+(p.y-cy2)*(p.y-cy2));
+      if(d2>maxR) maxR=d2;
     });
-  }
-  ST.subjects.forEach(function(sub){search(sub.subfields);});
-  return result;
-}
-
-// ── remove paper from wherever it is ──
-function removePaperFromTree(pid){
-  function sweep(children){
-    (children||[]).forEach(function(sf){
-      sf.papers=(sf.papers||[]).filter(function(x){return x!==pid;});
-      sweep(sf.children);
-    });
-  }
-  ST.subjects.forEach(function(sub){sweep(sub.subfields);});
-}
-
-// ── build drop zone ──
-function makeDZ(sf,path){
-  var dz=document.createElement('div');dz.className='dz';dz.textContent='drop paper here';
-  dz.addEventListener('dragover',function(e){e.preventDefault();e.stopPropagation();dz.classList.add('over');});
-  dz.addEventListener('dragleave',function(){dz.classList.remove('over');});
-  dz.addEventListener('drop',function(e){
-    e.preventDefault();e.stopPropagation();dz.classList.remove('over');
-    var pid=e.dataTransfer.getData('text/plain')||dragPid;
-    if(!pid) return;
-    removePaperFromTree(pid);
-    if(!sf.papers) sf.papers=[];
-    if(sf.papers.indexOf(pid)===-1) sf.papers.push(pid);
-    md();render();
-  });
-  return dz;
-}
-
-// ── build subfield recursively ──
-// path = array of sfids from root to this sf
-function buildSF(parentChildren,sf,path,depth){
-  depth=depth||0;
-  var wrap=document.createElement('div');wrap.className='sf';
-
-  // header
-  var hdr=document.createElement('div');hdr.className='sfh';
-  if(depth>0) hdr.style.paddingLeft=(8+depth*6)+'px';
-  var dot=document.createElement('div');dot.className='sfdot';dot.style.background=sf.color||'#888';
-  var nm=document.createElement('div');nm.className='sfname';nm.contentEditable='true';nm.textContent=sf.name;
-  nm.addEventListener('mousedown',function(e){e.stopPropagation();});
-  nm.addEventListener('blur',function(){sf.name=nm.textContent.trim()||'Subfield';md();});
-  nm.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();nm.blur();}});
-  var tog=document.createElement('span');tog.className='sftog';tog.textContent=sf.open!==false?'v':'^';
-
-  var sbtns=document.createElement('div');sbtns.className='sfbtns';
-
-  // colour button
-  var cb=document.createElement('button');cb.textContent='*';cb.title='Color';
-  cb.addEventListener('click',function(e){e.stopPropagation();sf.color=nc();dot.style.background=sf.color;md();});
-
-  // add nested subfield button
-  var nb=document.createElement('button');nb.textContent='+sf';nb.title='Add nested subfield';
-  nb.addEventListener('click',function(e){
-    e.stopPropagation();
-    if(!sf.children) sf.children=[];
-    sf.children.push({id:uid(),name:'New subfield',color:nc(),papers:[],children:[],open:true});
-    md();render();
-  });
-
-  // delete button
-  var db=document.createElement('button');db.textContent='X';db.title='Delete';
-  db.addEventListener('click',function(e){
-    e.stopPropagation();
-    var idx=parentChildren.indexOf(sf);
-    if(idx>-1) parentChildren.splice(idx,1);
-    md();render();
-  });
-
-  sbtns.appendChild(cb);sbtns.appendChild(nb);sbtns.appendChild(db);
-  hdr.appendChild(dot);hdr.appendChild(nm);hdr.appendChild(tog);hdr.appendChild(sbtns);
-  wrap.appendChild(hdr);
-
-  // body
-  var body=document.createElement('div');
-  body.className='sfbody'+(sf.open===false?' closed':'');
-  hdr.addEventListener('click',function(e){
-    if(e.target.contentEditable==='true'||e.target.tagName==='BUTTON') return;
-    sf.open=sf.open===false?true:false;
-    body.classList.toggle('closed',sf.open===false);
-    tog.textContent=sf.open!==false?'v':'^';
-  });
-
-  // render nested children first
-  if(sf.children&&sf.children.length){
-    sf.children.forEach(function(child){
-      body.appendChild(buildSF(sf.children,child,path.concat(child.id),depth+1));
-    });
-  }
-
-  // paper cards
-  (sf.papers||[]).forEach(function(pid){
-    var p=PM[pid];if(p) body.appendChild(makeCard(p,path));
-  });
-
-  // drop zone
-  body.appendChild(makeDZ(sf,path));
-
-  wrap.appendChild(body);
-  return wrap;
-}
-
-// ── subject node ──
-function mkbtn(label,fn){var b=document.createElement('button');b.textContent=label;b.addEventListener('click',fn);return b;}
-function buildNode(s){
-  var el=document.createElement('div');el.className='node';el.id='n_'+s.id;
-  el.style.left=s.x+'px';el.style.top=s.y+'px';
-  if(s.color) el.style.borderColor=s.color;
-
-  var head=document.createElement('div');head.className='node-head';
-  var dot=document.createElement('div');dot.className='ndot';dot.style.background=s.color||'#888';
-  var title=document.createElement('div');title.className='ntitle';title.contentEditable='true';title.textContent=s.name;
-  title.addEventListener('mousedown',function(e){e.stopPropagation();});
-  title.addEventListener('blur',function(){s.name=title.textContent.trim()||'Subject';md();});
-  title.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();title.blur();}});
-  var btns=document.createElement('div');btns.className='nbtns';
-  btns.appendChild(mkbtn('*',function(e){e.stopPropagation();s.color=nc();el.style.borderColor=s.color;dot.style.background=s.color;md();}));
-  btns.appendChild(mkbtn('X',function(e){
-    e.stopPropagation();
-    if(!confirm('Delete "'+s.name+'"?'))return;
-    ST.subjects=ST.subjects.filter(function(x){return x.id!==s.id;});
-    ST.arrows=ST.arrows.filter(function(a){return a.from!==s.id&&a.to!==s.id;});
-    md();render();
-  }));
-  head.appendChild(dot);head.appendChild(title);head.appendChild(btns);el.appendChild(head);
-
-  var body=document.createElement('div');body.className='nbody';
-  if(!s.subfields) s.subfields=[];
-  s.subfields.forEach(function(sf){
-    body.appendChild(buildSF(s.subfields,sf,[sf.id],0));
-  });
-
-  var addSF=document.createElement('button');addSF.className='addsf';addSF.textContent='+ Add subfield';
-  addSF.addEventListener('mousedown',function(e){e.stopPropagation();});
-  addSF.addEventListener('click',function(e){
-    e.stopPropagation();
-    s.subfields.push({id:uid(),name:'New subfield',color:nc(),papers:[],children:[],open:true});
-    md();render();
-  });
-  body.appendChild(addSF);el.appendChild(body);
-
-  makeDraggable(head,function(x,y){s.x=x;s.y=y;drawArrows();},{nodeEl:el,exclude:'button,[contenteditable]'});
-  el.addEventListener('click',function(e){if(AM&&!e.target.closest('button')&&!e.target.closest('[contenteditable]'))handleAC(s.id);});
-  el.addEventListener('dragover',function(e){e.preventDefault();});
-  document.getElementById('cv').appendChild(el);
-}
-
-// ── arrows ──
-var AM=false,AS=null,selArr=null;
-function nodeCenter(id){var el=document.getElementById('n_'+id);if(!el)return null;return{x:parseInt(el.style.left)+el.offsetWidth/2,y:parseInt(el.style.top)+el.offsetHeight/2};}
-function drawArrows(){
-  var svg=document.getElementById('sv');svg.querySelectorAll('.arr').forEach(function(e){e.remove();});
-  ST.arrows.forEach(function(a){
-    var c1=nodeCenter(a.from),c2=nodeCenter(a.to);if(!c1||!c2)return;
-    var dx=c2.x-c1.x,dy=c2.y-c1.y;
-    var path=document.createElementNS('http://www.w3.org/2000/svg','path');
-    path.setAttribute('d','M '+c1.x+' '+c1.y+' C '+(c1.x+dx*.45)+' '+c1.y+','+(c2.x-dx*.45)+' '+c2.y+','+c2.x+' '+c2.y);
-    path.setAttribute('class','arr'+(selArr===a.id?' sel':''));
-    path.setAttribute('marker-end',selArr===a.id?'url(#ahs)':'url(#ah)');
-    path.dataset.aid=a.id;
-    path.addEventListener('click',function(e){e.stopPropagation();selArr=selArr===a.id?null:a.id;document.getElementById('bda').style.display=selArr?'block':'none';drawArrows();});
-    svg.appendChild(path);
+    var label = LABELS[cid] || ('Cluster '+cid);
+    var sx=wx(cx2), sy=wy(cy2)-(maxR*scale+44);
+    ctx.font='bold 11px DM Mono,monospace';
+    ctx.fillStyle=color;
+    ctx.textAlign='center';
+    ctx.fillText(label.substr(0,30), sx, sy);
+    ctx.textAlign='left';
   });
 }
-function toggleAM(){
-  AM=!AM;AS=null;var b=document.getElementById('bam');
-  document.getElementById('sv').classList.toggle('am',AM);
-  b.classList.toggle('on',AM);b.textContent=AM?'Connecting...':'Connect';
+
+function hexToRgba(hex,a){
+  var r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);
+  return 'rgba('+r+','+g+','+b+','+a+')';
 }
-function handleAC(id){
-  if(!AM)return;
-  if(!AS){AS=id;var el=document.getElementById('n_'+id);if(el)el.classList.add('am-hi');}
-  else{
-    if(AS!==id){var exists=ST.arrows.some(function(a){return a.from===AS&&a.to===id;});if(!exists){ST.arrows.push({id:uid(),from:AS,to:id});md();}}
-    var el2=document.getElementById('n_'+AS);if(el2)el2.classList.remove('am-hi');
-    AS=null;toggleAM();render();
+
+function showTooltip(mx,my){
+  var best=null, bestD=Infinity;
+  DATA.forEach(function(d){
+    var sx=wx(d.x),sy=wy(d.y);
+    var dist=Math.sqrt((mx-sx)*(mx-sx)+(my-sy)*(my-sy));
+    if(dist<bestD){bestD=dist;best=d;}
+  });
+  var tt=document.getElementById('tooltip');
+  if(best && bestD < 20){
+    document.getElementById('tt').textContent=best.title.substr(0,60)+(best.title.length>60?'...':'');
+    document.getElementById('tm').textContent=(best.authors?best.authors.substr(0,40)+' ':'')+(best.year?'· '+best.year:'')+(best.journal?' · '+best.journal.substr(0,30):'');
+    document.getElementById('tc').textContent=best.label;
+    document.getElementById('tc').style.background=best.color+'33';
+    document.getElementById('tc').style.color=best.color;
+    tt.style.display='block';
+    tt.style.left=(mx+16)+'px';
+    tt.style.top=(my-10)+'px';
+  } else {
+    tt.style.display='none';
   }
 }
-function delArrow(){
-  if(!selArr)return;
-  ST.arrows=ST.arrows.filter(function(a){return a.id!==selArr;});
-  selArr=null;document.getElementById('bda').style.display='none';
-  md();drawArrows();
-}
 
-// ── node drag ──
-function makeDraggable(handle,onMove,opts){
-  opts=opts||{};var nodeEl=opts.nodeEl||handle;var sx,sy,sl,st2,active=false;
-  handle.addEventListener('mousedown',function(e){
-    if(opts.exclude&&e.target.closest(opts.exclude))return;
-    if(e.button!==0)return;
-    active=true;sx=e.clientX;sy=e.clientY;sl=parseInt(nodeEl.style.left)||0;st2=parseInt(nodeEl.style.top)||0;
-    e.preventDefault();e.stopPropagation();
-  });
-  document.addEventListener('mousemove',function(e){
-    if(!active)return;
-    var dx=(e.clientX-sx)/sc,dy=(e.clientY-sy)/sc;
-    nodeEl.style.left=Math.max(0,sl+dx)+'px';nodeEl.style.top=Math.max(0,st2+dy)+'px';
-    onMove(Math.max(0,sl+dx),Math.max(0,st2+dy));
-  });
-  document.addEventListener('mouseup',function(){if(active){active=false;md();}});
-}
+// build legend
+var leg=document.getElementById('leg');
+var seen={};
+DATA.forEach(function(d){
+  if(!seen[d.cluster]){
+    seen[d.cluster]=true;
+    var li=document.createElement('div');li.className='li';
+    var dot=document.createElement('div');dot.className='dot';dot.style.background=d.color;
+    var lbl=document.createElement('span');lbl.textContent=(LABELS[d.cluster]||('Cluster '+d.cluster)).substr(0,28);
+    li.appendChild(dot);li.appendChild(lbl);
+    leg.appendChild(li);
+  }
+});
 
-function addSubject(){
-  ST.subjects.push({id:uid(),name:'New Subject',color:nc(),x:(-px/sc)+80,y:(-py/sc)+70,subfields:[]});
-  md();render();
-}
-
-render();
+resize();
+initView();
+draw();
 </script>
 </body></html>"""
 
-    BOARD_HTML = BOARD_HTML.replace('PAPERS_PH', papers_js).replace('STATE_PH', state_js)
-    components.html(BOARD_HTML, height=740, scrolling=False)
-    st.caption("+ Subject · Connect two subjects · drag pool cards into subfield zones · hover card = x to unassign · scroll=zoom · drag canvas to pan · auto-saves on every change")
+        MAP_HTML = MAP_HTML.replace('DATA_PH', plot_js).replace('COLORS_PH', colors_js).replace('LABELS_PH', labels_js)
+        components.html(MAP_HTML, height=520, scrolling=False)
+
+        # Cluster summaries below map
+        st.markdown('<div class="section-title">Cluster Breakdown</div>', unsafe_allow_html=True)
+        for cid, paper_coords in clusters.items():
+            color = CLUSTER_COLORS[int(cid) % len(CLUSTER_COLORS)]
+            label = cluster_labels.get(cid, f"Cluster {cid}")
+            kws = st.session_state.get("cluster_keywords", {}).get(cid, [])
+            cluster_papers = [p for p in papers if str(p.get("cluster","")) == cid]
+
+            with st.expander(f"**{label}** — {len(cluster_papers)} papers"):
+                # Editable label
+                new_label = st.text_input("Rename cluster", value=label, key=f"lbl_{cid}")
+                if new_label != label:
+                    st.session_state.cluster_labels[cid] = new_label
+                    save_data()
+                    st.rerun()
+
+                if kws:
+                    chips = "".join([f'<span class="cluster-chip" style="background:{color}22;color:{color};">{k}</span>' for k in kws])
+                    st.markdown(f'<div style="margin:6px 0">{chips}</div>', unsafe_allow_html=True)
+
+                for p in cluster_papers:
+                    meta = " · ".join(x for x in [p.get("authors","")[:35], p.get("year",""), p.get("journal","")[:30]] if x)
+                    st.markdown(f'<div class="paper-card"><h5>{p["title"]}</h5><div class="meta">{meta}</div></div>', unsafe_allow_html=True)
 
 
-# ── PAGE: ADD PAPER ───────────────────────────────────────────
-elif page == "📄 Add Paper":
-    st.markdown('<div class="page-title">Add Paper</div>', unsafe_allow_html=True)
-    st.markdown('<div style="color:#888885;font-size:14px;margin-bottom:1.5rem;">Paste the title and abstract — analysis runs locally, no API needed.</div>', unsafe_allow_html=True)
+# ── PAGE: SEARCH & ADD ────────────────────────────────────────
+elif page == "🔍 Search & Add":
+    st.markdown('<div class="page-title">Search & Add</div>', unsafe_allow_html=True)
+    st.markdown('<div style="color:#888885;font-size:14px;margin-bottom:1.5rem;">Search CrossRef or Semantic Scholar — no API key needed.</div>', unsafe_allow_html=True)
 
-    with st.form("add_paper_form"):
-        title = st.text_input("Title *", placeholder="Full paper title...")
-        col1, col2 = st.columns(2)
+    tab1, tab2 = st.tabs(["🔎 Search by keyword", "🔗 Lookup by DOI"])
+
+    with tab1:
+        col1, col2 = st.columns([3,1])
         with col1:
-            authors = st.text_input("Authors", placeholder="Smith et al., 2023")
-            journal = st.text_input("Journal / Venue", placeholder="Nature, NeurIPS...")
+            query = st.text_input("Search query", placeholder="e.g. monetary policy firm discouragement euro area", label_visibility="collapsed")
         with col2:
-            year = st.text_input("Year", placeholder="2024")
-            paper_type = st.selectbox("Type", ["empirical","methods","review","theory"])
-        abstract = st.text_area("Abstract / Text *", placeholder="Paste the abstract or key excerpts...", height=160)
-        submitted = st.form_submit_button("Analyze & Add", type="primary")
+            source = st.selectbox("Source", ["Semantic Scholar", "CrossRef"], label_visibility="collapsed")
+
+        if st.button("Search", type="primary", use_container_width=False) and query:
+            with st.spinner(f"Searching {source}..."):
+                if source == "CrossRef":
+                    results = fetch_from_crossref(query)
+                else:
+                    results = fetch_from_semantic_scholar(query)
+
+            if not results:
+                st.warning("No results found. Try different keywords or switch source.")
+            else:
+                st.markdown(f'<div style="font-size:12px;color:#888885;font-family:DM Mono,monospace;margin-bottom:8px;">{len(results)} results</div>', unsafe_allow_html=True)
+                existing_ids = {p["id"] for p in st.session_state.papers}
+
+                for r in results:
+                    already = r["id"] in existing_ids
+                    c1, c2 = st.columns([5,1])
+                    with c1:
+                        meta = " · ".join(x for x in [r.get("authors","")[:40], r.get("year",""), r.get("journal","")[:35]] if x)
+                        abstr = ('<div style="font-size:10px;color:#888">'+r["abstract"][:120]+'...</div>') if r.get("abstract") else ""
+                        st.markdown(f'<div class="paper-card"><h5>{r["title"]}</h5><div class="meta">{meta}</div>{abstr}</div>', unsafe_allow_html=True)
+                    with c2:
+                        if already:
+                            st.markdown('<div style="font-size:11px;color:#c8f07a;padding-top:8px;">✓ Added</div>', unsafe_allow_html=True)
+                        else:
+                            if st.button("+ Add", key=f"add_{r['id']}"):
+                                st.session_state.papers.append(r)
+                                save_data()
+                                st.success(f"Added: {r['title'][:50]}")
+                                st.rerun()
+
+    with tab2:
+        doi_input = st.text_input("Enter DOI", placeholder="e.g. 10.1016/j.jmoneco.2023.01.001")
+        if st.button("Lookup DOI", type="primary") and doi_input:
+            with st.spinner("Looking up DOI..."):
+                result = fetch_by_doi(doi_input)
+            if not result:
+                st.error("Could not find paper with that DOI. Check the DOI and try again.")
+            else:
+                existing_ids = {p["id"] for p in st.session_state.papers}
+                st.markdown(f'<div class="paper-card"><h5>{result["title"]}</h5><div class="meta">{result.get("authors","")} · {result.get("year","")} · {result.get("journal","")}</div></div>', unsafe_allow_html=True)
+                if result["id"] in existing_ids:
+                    st.info("Already in your library.")
+                else:
+                    if st.button("+ Add this paper"):
+                        st.session_state.papers.append(result)
+                        save_data()
+                        st.success("Added!")
+                        st.rerun()
+
+
+# ── PAGE: MANUAL ADD ──────────────────────────────────────────
+elif page == "📄 Manual Add":
+    st.markdown('<div class="page-title">Manual Add</div>', unsafe_allow_html=True)
+    st.markdown('<div style="color:#888885;font-size:14px;margin-bottom:1.5rem;">Paste paper details directly — the abstract drives clustering quality.</div>', unsafe_allow_html=True)
+
+    with st.form("manual_form"):
+        title = st.text_input("Title *")
+        c1, c2 = st.columns(2)
+        with c1:
+            authors = st.text_input("Authors", placeholder="Smith, Jones et al.")
+            journal = st.text_input("Journal")
+        with c2:
+            year = st.text_input("Year")
+            doi = st.text_input("DOI (optional)")
+        abstract = st.text_area("Abstract *", height=150, placeholder="Paste the abstract here — this is what drives clustering")
+        submitted = st.form_submit_button("Add Paper", type="primary")
 
     if submitted:
         if not title or not abstract:
             st.error("Title and abstract are required.")
         else:
-            with st.spinner("Analyzing..."):
-                result = analyze_locally(title, abstract)
-                paper = {
-                    "id": hashlib.md5((title+str(datetime.now())).encode()).hexdigest(),
-                    "title": title, "authors": authors, "year": year,
-                    "journal": journal, "type": paper_type, "abstract": abstract,
-                    "summary": result["summary"], "findings": result["findings"],
-                    "themes": result["themes"], "gaps": result["gaps"],
-                    "analyzed": True, "source": "manual",
-                }
-                st.session_state.papers.append(paper)
-                st.session_state.selected_id = paper["id"]
+            pid = paper_id(title)
+            existing_ids = {p["id"] for p in st.session_state.papers}
+            if pid in existing_ids:
+                st.warning("This paper is already in your library.")
+            else:
+                st.session_state.papers.append({
+                    "id": pid, "title": title, "authors": authors,
+                    "year": year, "journal": journal, "doi": doi,
+                    "abstract": abstract, "source": "manual",
+                })
                 save_data()
-            st.success(f"Added: {title}")
-            st.rerun()
-
-
-# ── PAGE: UPLOAD PDF ──────────────────────────────────────────
-elif page == "📎 Upload PDF":
-    st.markdown('<div class="page-title">Upload PDF</div>', unsafe_allow_html=True)
-    st.markdown('<div style="color:#888885;font-size:14px;margin-bottom:1.5rem;">Upload PDFs — text is extracted and analyzed locally, no API needed.</div>', unsafe_allow_html=True)
-
-    if not PDF_SUPPORT:
-        st.warning("pypdf not installed. Run: pip install pypdf", icon="⚠️")
-    else:
-        uploaded = st.file_uploader("Drop PDF files here", type=["pdf"], accept_multiple_files=True, label_visibility="collapsed")
-        if uploaded:
-            if st.button(f"Process {len(uploaded)} PDF{'s' if len(uploaded)>1 else ''}", type="primary"):
-                for f in uploaded:
-                    with st.spinner(f"Reading {f.name}..."):
-                        try:
-                            file_bytes = f.read()
-                            text = extract_pdf_text(file_bytes)
-                            if not text or len(text) < 80:
-                                st.error(f"{f.name}: No readable text (may be scanned).")
-                                continue
-                            title = extract_title_from_text(text, f.name)
-                            abstract = extract_abstract(text)
-                            result = analyze_locally(title, text)
-                            paper = {
-                                "id": hashlib.md5((f.name+str(datetime.now())).encode()).hexdigest(),
-                                "title": title, "authors": "", "year": "", "journal": "",
-                                "type": "empirical", "abstract": abstract, "full_text": text[:5000],
-                                "summary": result["summary"], "findings": result["findings"],
-                                "themes": result["themes"], "gaps": result["gaps"],
-                                "analyzed": True, "source": "pdf", "filename": f.name,
-                            }
-                            st.session_state.papers.append(paper)
-                            st.session_state.selected_id = paper["id"]
-                            save_data()
-                            st.success(f"Added: {title[:60]}")
-                        except Exception as e:
-                            st.error(f"Error processing {f.name}: {str(e)}")
+                st.success(f"Added: {title[:60]}")
                 st.rerun()
 
 
-# ── PAGE: SYNTHESIS ───────────────────────────────────────────
-elif page == "🔗 Synthesis":
-    st.markdown('<div class="page-title">Synthesis</div>', unsafe_allow_html=True)
+# ── PAGE: LIBRARY ─────────────────────────────────────────────
+elif page == "📚 Library":
+    st.markdown('<div class="page-title">Library</div>', unsafe_allow_html=True)
     papers = st.session_state.papers
 
-    if len(papers) < 2:
-        st.info("Add at least 2 papers to see the synthesis.")
+    if not papers:
+        st.info("No papers yet. Use Search & Add or Manual Add.")
     else:
-        st.markdown(f'<div style="color:#888885;font-size:14px;margin-bottom:1rem;">{len(papers)} papers in your library</div>', unsafe_allow_html=True)
-        st.markdown('<div class="section-title">Cross-cutting Themes</div>', unsafe_allow_html=True)
+        search = st.text_input("Filter", placeholder="Search title or author...", label_visibility="collapsed")
+        filtered = [p for p in papers if search.lower() in p["title"].lower() or search.lower() in p.get("authors","").lower()] if search else papers
 
-        from collections import defaultdict
-        agg = {k: defaultdict(list) for k in ["geopolitical","period","techniques","datasets","variables"]}
-        for p in papers:
-            text = (p.get("abstract","") + " " + p.get("full_text","") + " " + p.get("summary","")).lower()
-            for cat, items in extract_structured_themes(text).items():
-                for item in items:
-                    agg[cat][item].append(p["title"])
+        st.markdown(f'<div style="font-size:12px;color:#888885;font-family:DM Mono,monospace;margin-bottom:12px;">{len(filtered)} of {len(papers)} papers</div>', unsafe_allow_html=True)
 
-        cat_config = [
-            ("geopolitical", "Geopolitical Focus", "#7eb8f7"),
-            ("period",       "Period of Data",     "#f5c97a"),
-            ("techniques",   "Analysis Techniques","#c8f07a"),
-            ("datasets",     "Datasets Used",      "#b49ffa"),
-            ("variables",    "Key Variables",      "#ff9f7a"),
-        ]
-        for cat_key, cat_label, color in cat_config:
-            items = agg[cat_key]
-            if not items:
-                continue
-            st.markdown(f'<div style="font-size:12px;font-weight:500;color:{color};font-family:DM Mono,monospace;text-transform:uppercase;letter-spacing:0.07em;margin:1rem 0 0.4rem;">{cat_label}</div>', unsafe_allow_html=True)
-            chips = ""
-            for item, paper_list in sorted(items.items(), key=lambda x: -len(x[1])):
-                tip = ", ".join(pp[:40] for pp in paper_list[:3])
-                chips += f'<span title="{tip}" style="display:inline-block;background:#18181c;border:1px solid rgba(255,255,255,0.1);border-radius:100px;padding:4px 12px;font-size:12px;color:{color};margin:3px;">{item} <span style="opacity:0.5;font-size:10px;">x{len(paper_list)}</span></span>'
-            st.markdown(f'<div>{chips}</div>', unsafe_allow_html=True)
+        for p in filtered:
+            cid = str(p.get("cluster",""))
+            color = CLUSTER_COLORS[int(cid) % len(CLUSTER_COLORS)] if cid else "#888885"
+            clabel = st.session_state.cluster_labels.get(cid, f"Cluster {cid}") if cid else "Unclustered"
+            meta = " · ".join(x for x in [p.get("authors","")[:40], p.get("year",""), p.get("journal","")[:35]] if x)
 
-        st.markdown('<div class="section-title">Research Gaps</div>', unsafe_allow_html=True)
-        for g in get_all_gaps():
-            st.markdown(f'<div class="gap-item">{g["gap"]}<br><span style="font-size:11px;color:#888885;font-family:DM Mono,monospace;">from: {g["paper"][:55]}</span></div>', unsafe_allow_html=True)
-
-        st.markdown('<div class="section-title">All Summaries</div>', unsafe_allow_html=True)
-        synthesis_text = ""
-        for p in papers:
-            st.markdown(f'<div style="background:#18181c;border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px 16px;margin-bottom:10px;"><div style="font-size:14px;font-weight:500;color:#f0ede8;margin-bottom:6px;">{p["title"]}</div><div style="font-size:13px;color:#ccc8c0;line-height:1.7;">{p.get("summary","")}</div></div>', unsafe_allow_html=True)
-            synthesis_text += f"## {p['title']}\n{p.get('summary','')}\n\nFindings:\n" + "\n".join(f"- {f}" for f in p.get("findings",[])) + "\n\n"
-
-        st.download_button("Download All Summaries (.txt)", synthesis_text, file_name="litlens-synthesis.txt", mime="text/plain")
+            c1, c2 = st.columns([5,1])
+            with c1:
+                doi_chip = ('<span class="cluster-chip" style="background:rgba(126,184,247,0.1);color:#7eb8f7;">' + p.get("doi","")[:25] + '</span>') if p.get("doi") else ""
+                st.markdown(f'<div class="paper-card"><h5>{p["title"]}</h5><div class="meta">{meta}</div><div style="margin-top:5px"><span class="cluster-chip" style="background:{color}22;color:{color};">{clabel}</span>{doi_chip}</div></div>', unsafe_allow_html=True)
+            with c2:
+                if st.button("🗑", key=f"del_{p['id']}", help="Remove"):
+                    st.session_state.papers = [x for x in st.session_state.papers if x["id"] != p["id"]]
+                    save_data()
+                    st.rerun()
 
 
-# ── PAGE: NOTES ───────────────────────────────────────────────
-elif page == "📝 Notes":
-    st.markdown('<div class="page-title">Notes</div>', unsafe_allow_html=True)
+# ── PAGE: SETTINGS ────────────────────────────────────────────
+elif page == "⚙️ Settings":
+    st.markdown('<div class="page-title">Settings</div>', unsafe_allow_html=True)
 
-    if not st.session_state.papers:
-        st.info("Add papers first to attach notes to them.")
-    else:
-        paper_titles = {p["id"]: p["title"] for p in st.session_state.papers}
-        paper_ids = list(paper_titles.keys())
-        default_idx = 0
-        if st.session_state.selected_id in paper_ids:
-            default_idx = paper_ids.index(st.session_state.selected_id)
-        selected_for_note = st.selectbox("Select paper", options=paper_ids, index=default_idx,
-                                          format_func=lambda x: paper_titles[x])
-        st.session_state.selected_id = selected_for_note
+    st.markdown('<div class="section-title">Clustering</div>', unsafe_allow_html=True)
+    n_clusters_manual = st.slider("Number of clusters (0 = auto-detect)", 0, 12, 0)
 
-        existing = st.session_state.notes.get(selected_for_note, "")
-        new_note = st.text_area("Your notes", value=existing, height=200,
-                                 placeholder="Write your thoughts, critiques, connections to other work...")
+    if st.button("Run Clustering", type="primary"):
+        k = n_clusters_manual if n_clusters_manual > 0 else None
+        with st.spinner("Clustering..."):
+            ok, msg = run_clustering(k)
+        if ok:
+            st.success(msg)
+            st.rerun()
+        else:
+            st.error(msg)
 
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Save Note", type="primary", use_container_width=True):
-                st.session_state.notes[selected_for_note] = new_note
-                save_data()
-                st.success("Saved!")
-        with col2:
-            if st.button("Clear Note", use_container_width=True):
-                st.session_state.notes[selected_for_note] = ""
-                st.rerun()
+    st.markdown('<div class="section-title">Data</div>', unsafe_allow_html=True)
+    st.markdown(f'<div style="font-size:13px;color:#888885;">Data file: <span style="font-family:DM Mono,monospace;color:#c8f07a;">{DATA_FILE}</span></div>', unsafe_allow_html=True)
 
-        if any(v for v in st.session_state.notes.values()):
-            st.markdown('<div class="section-title">All Notes</div>', unsafe_allow_html=True)
-            all_notes_text = ""
-            for pid, note in st.session_state.notes.items():
-                if note and pid in paper_titles:
-                    st.markdown(f'<div style="background:#18181c;border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px 16px;margin-bottom:10px;"><div style="font-size:13px;font-weight:500;color:#c8f07a;margin-bottom:6px;">{paper_titles[pid]}</div><div style="font-size:13px;color:#ccc8c0;line-height:1.7;white-space:pre-wrap;">{note}</div></div>', unsafe_allow_html=True)
-                    all_notes_text += f"## {paper_titles[pid]}\n{note}\n\n"
-            if all_notes_text:
-                st.download_button("Download All Notes", all_notes_text, file_name="litlens-notes.txt", mime="text/plain")
+    if st.session_state.papers:
+        export = json.dumps({"papers": st.session_state.papers, "clusters": st.session_state.clusters, "cluster_labels": st.session_state.cluster_labels}, indent=2)
+        st.download_button("⬇ Export Library (JSON)", export, file_name="papercluster_export.json", mime="application/json")
+
+    st.markdown('<div class="section-title">Dependencies</div>', unsafe_allow_html=True)
+    st.markdown(f'- scikit-learn: {"✓" if SKLEARN_OK else "✗ run: pip install scikit-learn"}', unsafe_allow_html=False)
+    st.markdown(f'- requests: {"✓" if REQUESTS_OK else "✗ run: pip install requests"}', unsafe_allow_html=False)
+    st.markdown(f'- scholarly: {"✓ (optional)" if SCHOLARLY_OK else "○ optional — pip install scholarly"}', unsafe_allow_html=False)
